@@ -1,0 +1,445 @@
+#!/usr/bin/env python3
+"""check: run every linter and format check on a source tree, with or without git.
+
+Runs ruff, flake8 with wemake-python-styleguide, shellcheck, rumdl, tombi, yamlfmt, stylua and
+lychee, each in the tree, so that it reads the project's own configuration. Where a project has
+none, the tool gets bash-camp's default from config/ (ruff finds its own in ~/.config, where
+`camp pitch` links it). A tool with no files to look at is skipped. In a git work tree, what git
+ignores is left out; without git, everything but SKIP_DIRS is checked.
+
+The Python tools come through uvx at pinned versions; yamlfmt, stylua and lychee from bash-camp's
+toolchain.
+
+Usage:
+    check [DIR]              # check DIR, by default the current directory
+    check --fix [DIR]        # apply formatters and autofixes first, then check
+    check --skip lychee      # leave a checker out; repeatable
+    check -v [DIR]           # more output from every checker that has it, and each command shown
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+# Pinned, so that every machine reports the same.
+RUFF = ("uvx", "-q", "ruff@0.16.1")
+# flake8's plugins parse with the running Python's ast, and some need Python >= 3.11 (ast.TryStar).
+FLAKE8 = (
+    "uvx",
+    "-q",
+    "--python",
+    "3.12",
+    "--from",
+    "flake8==7.3.0",
+    "--with",
+    "wemake-python-styleguide==1.8.0",
+)
+RUMDL = ("uvx", "-q", "rumdl@0.2.57")
+TOMBI = ("uvx", "-q", "tombi@1.5.5")
+SHELLCHECK = ("uvx", "-q", "--from", "shellcheck-py==0.11.0.1", "shellcheck")
+
+# bash-camp's config/, next to this bin/: the checkout's, or $CAMP_HOME/src/config once installed.
+CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
+
+# Stand-ins in a command: FILES for the checker's files; SCRIPTS for those among them that have no
+# suffix and are only recognized by their shebang, which tools finding files themselves miss;
+# CONFIG for the default configuration, where the project has none; VERBOSE for the tool's flag for
+# more output, under -v.
+FILES = "<files>"
+SCRIPTS = "<scripts>"
+CONFIG = "<config>"
+VERBOSE = "<verbose>"
+
+# Never searched: version control, environments, caches and build output.
+SKIP_DIRS = frozenset(
+    (
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        ".tox",
+        ".nox",
+        ".pixi",
+        ".cache",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".rumdl_cache",
+        "__pycache__",
+        "node_modules",
+        "build",
+        "dist",
+    )
+)
+SUFFIXES = {
+    ".py": "python",
+    ".pyi": "python",
+    ".ipynb": "python",
+    ".sh": "shell",
+    ".bash": "shell",
+    ".md": "markdown",
+    ".toml": "toml",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".lua": "lua",
+}
+SHEBANGS = (
+    (re.compile(rb"^#!.*\bpython[0-9.]*\b"), "python"),
+    (re.compile(rb"^#!\s*\S*/(?:env\s+)?(?:ba|da|k)?sh\b"), "shell"),
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class DefaultConfig:
+    """bash-camp's configuration for a tool, for projects without one of their own.
+
+    Attributes:
+        option: the tool's option that names a configuration file; None for a tool without one,
+            which is pointed at the default through $XDG_CONFIG_HOME instead.
+        path: the default, relative to CONFIG_DIR.
+        project: where a project would configure the tool: file names, or "file:[section]" for a
+            section of a shared file.
+    """
+
+    option: str | None
+    path: str
+    project: tuple[str, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class Checker:
+    """One check, and the fix that goes with it.
+
+    Attributes:
+        name: what --skip and the summary call it.
+        kind: the files it looks at: "python", "shell", "markdown", "toml", "yaml" or "lua".
+        check: the command that only reports.
+        fix: the command that rewrites the files, or None.
+        config: the default configuration, for the CONFIG stand-in.
+        verbose: the tool's flag for more output, for the VERBOSE stand-in.
+    """
+
+    name: str
+    kind: str
+    check: tuple[str, ...]
+    fix: tuple[str, ...] | None = None
+    config: DefaultConfig | None = None
+    verbose: str = "-v"
+
+
+FLAKE8_CONFIG = DefaultConfig(
+    "--config", "flake8/flake8.ini", (".flake8", "setup.cfg:[flake8]", "tox.ini:[flake8]")
+)
+RUMDL_CONFIG = DefaultConfig(
+    "--config",
+    "rumdl/rumdl.toml",
+    (
+        ".rumdl.toml",
+        "rumdl.toml",
+        ".config/rumdl.toml",
+        "pyproject.toml:[tool.rumdl]",
+        ".markdownlint.json",
+        ".markdownlint.jsonc",
+        ".markdownlint.yaml",
+        ".markdownlint.yml",
+    ),
+)
+YAMLFMT_CONFIG = DefaultConfig(
+    "-conf",
+    "yamlfmt/yamlfmt.yaml",
+    (".yamlfmt", ".yamlfmt.yaml", ".yamlfmt.yml", "yamlfmt.yaml", "yamlfmt.yml"),
+)
+LYCHEE_CONFIG = DefaultConfig("--config", "lychee/lychee.toml", ("lychee.toml",))
+STYLUA_CONFIG = DefaultConfig(
+    "--config-path", "stylua/stylua.toml", ("stylua.toml", ".stylua.toml")
+)
+TOMBI_CONFIG = DefaultConfig(
+    None,
+    "tombi/config.toml",
+    ("tombi.toml", ".tombi.toml", ".config/tombi.toml", "pyproject.toml:[tool.tombi]"),
+)
+
+CHECKERS = (
+    Checker(
+        "ruff-format",
+        "python",
+        (*RUFF, "format", VERBOSE, "--check", "--force-exclude", ".", SCRIPTS),
+        (*RUFF, "format", VERBOSE, "--force-exclude", ".", SCRIPTS),
+    ),
+    Checker(
+        "ruff-check",
+        "python",
+        (*RUFF, "check", VERBOSE, "--force-exclude", ".", SCRIPTS),
+        (*RUFF, "check", VERBOSE, "--fix", "--force-exclude", ".", SCRIPTS),
+    ),
+    Checker(
+        "flake8", "python", (*FLAKE8, "flake8", VERBOSE, CONFIG, ".", SCRIPTS), config=FLAKE8_CONFIG
+    ),
+    # shellcheck has no flag for more output.
+    Checker("shellcheck", "shell", (*SHELLCHECK, FILES)),
+    Checker(
+        "rumdl",
+        "markdown",
+        (*RUMDL, "check", VERBOSE, CONFIG, "."),
+        (*RUMDL, "fmt", VERBOSE, CONFIG, "."),
+        config=RUMDL_CONFIG,
+    ),
+    Checker(
+        "tombi-format",
+        "toml",
+        (*TOMBI, "format", VERBOSE, "--check"),
+        (*TOMBI, "format", VERBOSE),
+        config=TOMBI_CONFIG,
+    ),
+    Checker("tombi-lint", "toml", (*TOMBI, "lint", VERBOSE), config=TOMBI_CONFIG),
+    Checker(
+        "yamlfmt",
+        "yaml",
+        ("yamlfmt", CONFIG, VERBOSE, "-lint", FILES),
+        ("yamlfmt", CONFIG, VERBOSE, FILES),
+        config=YAMLFMT_CONFIG,
+        verbose="-verbose",
+    ),
+    Checker(
+        "stylua",
+        "lua",
+        ("stylua", CONFIG, VERBOSE, "--check", FILES),
+        ("stylua", CONFIG, VERBOSE, FILES),
+        config=STYLUA_CONFIG,
+    ),
+    Checker(
+        "lychee",
+        "markdown",
+        ("lychee", CONFIG, VERBOSE, "--no-progress", "."),
+        config=LYCHEE_CONFIG,
+    ),
+)
+
+
+def main() -> None:
+    """CLI entry point: run the checks, print a summary, exit 1 if any failed."""
+    names = [checker.name for checker in CHECKERS]
+    parser = argparse.ArgumentParser(
+        description="Run every linter and format check on a source tree.",
+        epilog=f"Checkers: {', '.join(names)}.",
+    )
+    parser.add_argument("dir", nargs="?", default=".", type=Path, help="the tree to check")
+    parser.add_argument("--fix", action="store_true", help="apply fixes first, then check")
+    parser.add_argument(
+        "--skip", action="append", default=[], choices=names, metavar="NAME", help="skip a checker"
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="more output from every checker that has it (all but shellcheck), and each command",
+    )
+    args = parser.parse_args()
+
+    root = args.dir.resolve()
+    if not root.is_dir():
+        sys.exit(f"check: {args.dir} is not a directory.")
+
+    files = _find_files(root, _git_ignored(root))
+    results = [
+        (checker.name, _run(checker, root, files, fix=args.fix, verbose=args.verbose))
+        for checker in CHECKERS
+        if checker.name not in args.skip
+    ]
+
+    print("\nSummary:")
+    for name, result in results:
+        print(f"  {name:<14}{result}")
+    if any(result in ("FAILED", "unavailable") for _, result in results):
+        sys.exit(1)
+
+
+def _find_files(root: Path, ignored: frozenset[str]) -> dict[str, list[str]]:
+    """Every file a checker could look at, by kind.
+
+    :param root: the tree.
+    :param ignored: paths to leave out, relative to root; directories end with "/".
+    :return: kind -> paths relative to root, sorted; a kind without files is absent.
+    """
+    found: dict[str, list[str]] = {}
+    for current, dirs, names in os.walk(root):
+        relative = Path(current).relative_to(root)
+        dirs[:] = sorted(
+            name
+            for name in dirs
+            if name not in SKIP_DIRS and f"{(relative / name).as_posix()}/" not in ignored
+        )
+        for name in names:
+            path = Path(current, name)
+            kind = SUFFIXES.get(path.suffix) if path.suffix else _shebang_kind(path)
+            if kind is None or path.is_symlink() or (relative / name).as_posix() in ignored:
+                continue
+            found.setdefault(kind, []).append(str(path.relative_to(root)))
+
+    return {kind: sorted(paths) for kind, paths in found.items()}
+
+
+def _git_ignored(root: Path) -> frozenset[str]:
+    """What git ignores in the tree, as the tools that read .gitignore themselves see it.
+
+    :param root: the tree.
+    :return: paths relative to root, directories with a trailing "/"; empty without git or outside
+        a work tree.
+    """
+    if shutil.which("git") is None:
+        return frozenset()
+
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return frozenset()
+    return frozenset(path for path in result.stdout.split("\0") if path)
+
+
+def _shebang_kind(path: Path) -> str | None:
+    """The kind of a file without a suffix, from its shebang.
+
+    :param path: the file.
+    :return: "python", "shell", or None for anything else.
+    """
+    try:
+        with path.open("rb") as fin:
+            first_line = fin.readline(200)
+    except OSError:
+        return None
+
+    return next((kind for pattern, kind in SHEBANGS if pattern.match(first_line)), None)
+
+
+def _run(
+    checker: Checker, root: Path, files: dict[str, list[str]], *, fix: bool, verbose: bool
+) -> str:
+    """Run one checker, after its fix when asked to, with its output going straight through.
+
+    :param checker: the checker.
+    :param root: the tree; the commands run in it.
+    :param files: the tree's files, from `_find_files`.
+    :param fix: run the checker's fix first.
+    :param verbose: pass the checker its flag for more output, and print each command.
+    :return: its line in the summary: "ok", "FAILED", "unavailable" or "skipped (why)".
+    """
+    kind_files = files.get(checker.kind, [])
+    if not kind_files:
+        return f"skipped (no {checker.kind} files)"
+
+    if shutil.which(checker.check[0]) is None:
+        print(f"\n== {checker.name}: {checker.check[0]} not found", file=sys.stderr)
+        return "unavailable"
+
+    stand_ins = {
+        FILES: kind_files,
+        SCRIPTS: [path for path in kind_files if not Path(path).suffix],
+        CONFIG: _config_args(checker.config, root),
+        VERBOSE: [checker.verbose] if verbose else [],
+    }
+    env = _config_env(checker.config, root)
+    if fix and checker.fix is not None:
+        command = _expand(checker.fix, stand_ins)
+        _announce(f"{checker.name} (fix)", command, verbose=verbose)
+        subprocess.run(command, cwd=root, env=env, check=False)
+
+    command = _expand(checker.check, stand_ins)
+    _announce(checker.name, command, verbose=verbose)
+    result = subprocess.run(command, cwd=root, env=env, check=False)
+    return "ok" if result.returncode == 0 else "FAILED"
+
+
+def _announce(title: str, command: list[str], *, verbose: bool) -> None:
+    """Print the header of a command's output.
+
+    :param title: what runs.
+    :param command: the command line, shown under -v.
+    :param verbose: show the command line too.
+    """
+    print(f"\n== {title}", flush=True)
+    if verbose:
+        print(f"$ {shlex.join(command)}", flush=True)
+
+
+def _expand(command: tuple[str, ...], stand_ins: dict[str, list[str]]) -> list[str]:
+    """A command with its stand-ins replaced.
+
+    :param command: the command.
+    :param stand_ins: what each stand-in becomes.
+    :return: the command line.
+    """
+    expanded: list[str] = []
+    for arg in command:
+        expanded.extend(stand_ins.get(arg, [arg]))
+    return expanded
+
+
+def _config_args(config: DefaultConfig | None, root: Path) -> list[str]:
+    """The arguments that point a tool at bash-camp's default configuration.
+
+    :param config: the default, or None for a tool without one.
+    :param root: the tree.
+    :return: the option and the file; nothing where the project configures the tool itself, or
+        the tool has no such option.
+    """
+    if config is None or config.option is None or _configured(config, root):
+        return []
+    return [config.option, str(CONFIG_DIR / config.path)]
+
+
+def _config_env(config: DefaultConfig | None, root: Path) -> dict[str, str] | None:
+    """The environment that points a tool without a config option at bash-camp's default.
+
+    :param config: the default, or None for a tool without one.
+    :param root: the tree.
+    :return: the environment with $XDG_CONFIG_HOME at CONFIG_DIR; None, to inherit it, for a tool
+        with a config option or where the project configures the tool itself.
+    """
+    if config is None or config.option is not None or _configured(config, root):
+        return None
+    return {**os.environ, "XDG_CONFIG_HOME": str(CONFIG_DIR)}
+
+
+def _configured(config: DefaultConfig, root: Path) -> bool:
+    """Whether the tree configures a tool itself.
+
+    :param config: the tool's default, which lists where a project would configure it.
+    :param root: the tree.
+    :return: True when any of those places has a configuration.
+    """
+    return any(_configures(root, place) for place in config.project)
+
+
+def _configures(root: Path, place: str) -> bool:
+    """Whether the tree has a configuration in one place.
+
+    :param root: the tree.
+    :param place: a file name, or "file:[section]" for a section of a shared file.
+    :return: True when the file exists, and has the section if one is named.
+    """
+    name, _, section = place.partition(":")
+    path = root / name
+    if not path.is_file():
+        return False
+    if not section:
+        return True
+    return re.search(rf"^{re.escape(section)}", path.read_text(), re.MULTILINE) is not None
+
+
+if __name__ == "__main__":
+    main()

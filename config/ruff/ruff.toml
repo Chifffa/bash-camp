@@ -1,0 +1,145 @@
+# Ruff, linked to ~/.config/ruff by bash-camp: the defaults where a project has no ruff config.
+extend-include = ["*.ipynb"]
+extend-exclude = ["third_party"]
+src = ["src"]
+line-length = 100
+
+[format]
+docstring-code-format = true
+
+[lint]
+# wemake-python-styleguide codes, checked by flake8: ruff leaves their `noqa` comments alone.
+external = [
+  "WPS101",
+  "WPS102",
+  "WPS116",
+  "WPS117",
+  "WPS119",
+  "WPS405",
+  "WPS406",
+  "WPS409",
+  "WPS418",
+  "WPS422",
+  "WPS438",
+  "WPS439",
+  "WPS443",
+  "WPS444",
+  "WPS445",
+  "WPS446",
+  "WPS447",
+  "WPS448",
+  "WPS449",
+  "WPS455",
+  "WPS460",
+  "WPS463",
+  "WPS464",
+  "WPS466",
+  "WPS468",
+  "WPS469",
+  "WPS470",
+  "WPS471",
+  "WPS472",
+  "WPS473",
+  "WPS477",
+  "WPS479",
+  "WPS480",
+  "WPS481",
+  "WPS516",
+  "WPS328",
+  "WPS529",
+  "WPS601",
+  "WPS605",
+  "WPS607",
+  "WPS608",
+  "WPS610",
+  "WPS611",
+  "WPS613",
+  "WPS616",
+  "WPS617",
+  "DNC001",
+]
+select = [
+  "D",  # pydocstyle
+  "E",  # pycodestyle
+  "F",  # pyflakes
+  "I",  # isort
+  "UP",  # pyupgrade
+  "W",  # pycodestyle
+  "ARG",  # flake8-unused-arguments
+  "ISC",  # flake8-implicit-str-concat
+  "PERF",  # perflint
+  "C4",  # flake8-comprehensions
+  "N",  # pep8-naming
+  "FURB",  # refurb
+  "SIM",  # flake8-simplify
+  "RET",  # flake8-return
+  "PIE",  # flake8-pies
+  "PT",  # flake8-pytest-style
+  "RUF",  # ruff
+  "RSE",  # flake8-raise
+  "Q",  # flake8-quotes
+  "T20",  # flake8-print: ban print statement
+  "PTH",  # flake8-use-pathlib: force pathlib usage
+  "B",  # flake8-bugbear
+  "A",  # flake8-builtins: no shadowing of Python builtins
+  "ASYNC",  # flake8-async: blocking calls and other pitfalls inside async functions
+  "DTZ",  # flake8-datetimez: timezone-aware datetimes only
+  "FLY",  # flynt: static join → f-string
+  "ICN",  # flake8-import-conventions: canonical third-party aliases
+  "PLW",  # pylint Warning-severity checks (silent-behavior bugs, subprocess check, hashing)
+  "PLC0105",  # pylint: TypeVar name must reflect its variance
+  "PLR0402",  # pylint: prefer `from mod import submodule` over aliased dotted import
+  "PLR1704",  # pylint: local must not redefine an argument
+  "PLR1733",  # pylint: unnecessary dict index lookup -> use the iterated value
+  "PLR1714",  # pylint: repeated equality comparisons -> `in` tuple
+  "PLR1730",  # pylint: if-stmt min/max clamps -> max()/min()
+  "PLR5501",  # pylint: collapsible else-if -> elif
+  "PLE",  # pylint Error-severity checks only (real errors, low false-positive rate)
+  "YTT",  # flake8-2020: sys.version comparison pitfalls
+  "PYI018",  # unused private TypeVar/ParamSpec definitions (caught PEP 695 migration orphans)
+]
+ignore = [
+  "D100",  # Missing docstring in public module
+  "D101",  # Missing docstring in public class
+  "D102",  # Missing docstring in public method
+  "D103",  # Missing docstring in public function
+  "D104",  # Missing docstring in public package
+  "D105",  # Missing docstring in magic method
+  "D106",  # Missing docstring in public nested class
+  "D107",  # Missing docstring in `__init__`
+  "D209",  # [*] Multi-line docstring closing quotes should be on a separate line
+  "D205",  # 1 blank line required between summary line and description
+  "D400",  # First line should end with a period
+  "D401",  # First line of docstring should be in imperative mood
+  "D402",  # First line should not be the function's signature
+  "D404",  # First word of the docstring should not be "This"
+  "D415",  # First line should end with a period, question mark, or exclamation point
+  "D418",  # Function decorated with `@overload` shouldn't contain a docstring
+  "N812",  # Lowercase ... imported as non-lowercase ...
+  "N817",  # camelcase-imported-as-acronym
+  "N803",  # Argument name should be lowercase
+  "N806",  # Variable in function should be lowercase
+  "PERF203",  # try-except in the loop
+  "B008",  # Do not perform function call in argument
+  "S101",  # Use of `assert` detected
+  "S301",  # Usage of pickle
+  "C901",  # Too complex
+  "ISC001",
+  "ISC002",
+  "PLW1641",  # mutable dataclass value-boxes (e.g. bbox Box2D/Box3D) are unhashable by design; failing with `unhashable type` at runtime is loud enough
+  "PLW2901",  # rebinding loop variables is an established pattern in data-wrangling code
+  "PLW0603",  # module-level feature toggles use the `global` statement deliberately
+  "A002",  # step/workflow signatures use port names like `input`/`type`; renaming them breaks graph wiring
+  "UP040",  # Keep eager aliases for runtime introspection and connector equality.
+  "UP046",  # Generic class migrations require review of variance and runtime behavior.
+]
+
+[lint.extend-per-file-ignores]
+# Packages re-export what they import.
+"__init__.py" = ["F401"]
+
+[lint.isort]
+lines-after-imports = 2
+
+[lint.pydocstyle]
+convention = "google"

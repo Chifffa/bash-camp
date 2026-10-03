@@ -1,0 +1,28 @@
+# =============================================================================
+# bash-camp
+# =============================================================================
+# Everything bash-camp builds lives in $CAMP_HOME (~/.camp), never in the
+# checkout, so only the private overlay and local tests stay out of git here.
+
+# Credentials, keys and env files of the machine this checkout lives on; see
+# secrets.example/ for the format.
+secrets/
+
+# -----------------------------------------------------------------------------
+# Tooling noise.
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.rumdl_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Editors.
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS.
+.DS_Store

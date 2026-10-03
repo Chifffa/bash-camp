@@ -1,0 +1,17 @@
+# Ghostty, linked to ~/.config/ghostty by bash-camp.
+
+# Catppuccin after the desktop's light or dark mode: Frappé when dark, like starship, tmux and nvim.
+theme = dark:Catppuccin Frappe,light:Catppuccin Latte
+window-theme = auto
+font-size = 14
+# macOS only.
+font-thicken = true
+background-opacity = 0.9
+background-blur = 10
+
+# tmux 3.6 reads the byte Ctrl-h sends as Backspace, so vim-tmux-navigator's Ctrl-h never left a
+# shell pane; sent in its CSI u form, it arrives as C-h.
+# https://github.com/christoomey/vim-tmux-navigator/issues/421
+keybind = ctrl+h=esc:[104;5u
+# Shift-Enter types a bare line feed: a new line, not a submit, in TUIs that tell the two apart.
+keybind = shift+enter=text:\n

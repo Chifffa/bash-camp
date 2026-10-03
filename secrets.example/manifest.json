@@ -1,0 +1,22 @@
+{
+  "$schema": "../secrets.schema.json",
+  "files": [
+    {
+      "source": "example.env",
+      "load": "env",
+      "comment": "KEY=value lines, exported into every shell."
+    },
+    {
+      "source": "example-credentials.json",
+      "target": "~/.config/example/credentials.json",
+      "mode": "600"
+    },
+    {
+      "source": "id_ed25519",
+      "target": "~/.ssh/id_ed25519",
+      "mode": "600",
+      "local_only": true,
+      "comment": "Kept on this machine only: never shipped to remote hosts, which use the forwarded agent."
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# tent: the tmux session to work in - htop top-left, `watch nvidia-smi` top-right on a GPU host,
+# and a shell below.
+#
+# Usage:
+#   tent          attach to the "tent" session, pitching it first if needed
+#   tent strike   kill it
+set -euo pipefail
+
+readonly SESSION=tent
+
+usage() {
+  echo "usage: tent [strike]"
+}
+
+pitch() {
+  if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
+    echo "Pitching session \"$SESSION\"."
+    local top work gpu
+    top=$(tmux new-session -d -P -F '#{pane_id}' -s "$SESSION" -n main)
+    work=$(tmux split-window -v -l 25% -P -F '#{pane_id}' -t "$top")
+    if command -v nvidia-smi >/dev/null; then
+      gpu=$(tmux split-window -h -l 40% -P -F '#{pane_id}' -t "$top")
+      tmux send-keys -t "$gpu" "watch -n 0.5 nvidia-smi" Enter
+    fi
+    tmux send-keys -t "$top" "htop -d 5" Enter
+    tmux select-pane -t "$work"
+  fi
+
+  # Inside tmux, attaching would nest a client; switch to the session instead.
+  if [[ -n ${TMUX-} ]]; then
+    exec tmux switch-client -t "=$SESSION"
+  fi
+  exec tmux attach-session -t "=$SESSION"
+}
+
+strike() {
+  if tmux has-session -t "=$SESSION" 2>/dev/null; then
+    tmux kill-session -t "=$SESSION"
+    echo "Session \"$SESSION\" struck."
+  else
+    echo "No session \"$SESSION\"; nothing to strike."
+  fi
+}
+
+case ${1-} in
+  "") pitch ;;
+  strike) strike ;;
+  -h | --help) usage ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,5 @@
+# StyLua, linked to ~/.config/stylua by bash-camp: the Lua style `check` and Neovim's format on save
+# use where a project has none of its own.
+column_width = 100
+indent_type = "Spaces"
+indent_width = 2

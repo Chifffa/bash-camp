@@ -1,0 +1,7 @@
+# yamlfmt, linked to ~/.config/yamlfmt by bash-camp: the defaults `check` uses where a project has
+# no yamlfmt configuration.
+formatter:
+  type: basic
+  indent: 2
+  retain_line_breaks: true
+  max_line_length: 100

@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""docker-gpu-stat: per-process GPU usage of the running Docker containers.
+
+nvidia-smi knows which processes use which GPU but not which container they belong to; docker knows
+which processes each container runs but nothing about GPUs. This joins the two on the host PID and
+prints one block per container that uses a GPU: the container, then each of its GPU processes.
+
+It has to run on the host. Only there do `docker top` and nvidia-smi report PIDs from the same PID
+namespace; inside a container nvidia-smi cannot resolve the host's PIDs, so nothing would match and
+the table would come out silently empty.
+
+Usage:
+    docker-gpu-stat
+"""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+# Files container runtimes create inside every container: Docker /.dockerenv, Podman
+# /run/.containerenv.
+CONTAINER_MARKERS = (Path("/.dockerenv"), Path("/run/.containerenv"))
+# Under cgroup v1 the runtime shows up in PID 1's cgroup path. Under cgroup v2 that path reads
+# `0::/` from inside a container and says nothing, which is why the marker files come first.
+CONTAINER_CGROUP_WORDS = ("docker", "containerd", "kubepods", "libpod")
+
+# The table, in column order, with each column's width; longer values are cut and marked "...".
+COLUMN_WIDTHS = {"Container": 12, "Name": 25, "pid": 8, "index": 5, "used_memory": 12}
+CONTAINER_COLUMNS = ("Container", "Name")
+PROCESS_COLUMNS = ("pid", "index", "used_memory")
+
+
+class GpuStatError(Exception):
+    """A failure the user can act on: printed without a traceback, exits with status 1."""
+
+
+def main() -> None:
+    """CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description="Show per-process GPU usage inside Docker containers. Run it on the host."
+    )
+    parser.parse_args()
+
+    try:
+        _check_environment()
+        rows = _table_rows(_gpu_processes(), _containers())
+    except GpuStatError as error:
+        sys.exit(f"docker-gpu-stat: {error}")
+    print(_render(rows))
+
+
+def _check_environment() -> None:
+    """Refuse to run where the table could only come out empty or not at all.
+
+    :raises GpuStatError: inside a container, or without docker or nvidia-smi.
+    """
+    evidence = _container_evidence()
+    if evidence is not None:
+        raise GpuStatError(
+            f"This is a container ({evidence}); run it on the host. Inside a container nvidia-smi"
+            " cannot see the host's PIDs, so no GPU process could be matched to a container."
+        )
+    if shutil.which("docker") is None:
+        raise GpuStatError(
+            "docker is not installed, or not on PATH. It is what lists the containers and their"
+            " processes."
+        )
+    if shutil.which("nvidia-smi") is None:
+        raise GpuStatError(
+            "nvidia-smi is not installed, or not on PATH. It is what lists the GPU processes."
+        )
+
+
+def _container_evidence() -> str | None:
+    """Why this looks like the inside of a container.
+
+    :return: the evidence, for the error message, or None on the host.
+    """
+    for marker in CONTAINER_MARKERS:
+        if marker.exists():
+            return f"{marker} exists"
+    try:
+        cgroup = Path("/proc/1/cgroup").read_text()
+    except OSError:
+        return None
+
+    word = next((word for word in CONTAINER_CGROUP_WORDS if word in cgroup), None)
+    return None if word is None else f"/proc/1/cgroup mentions {word}"
+
+
+def _gpu_processes() -> list[dict[str, str]]:
+    """Every process nvidia-smi reports, with the index of the GPU it runs on.
+
+    :return: one row per process: "pid", "index", "used_memory".
+    """
+    gpu_index = dict(
+        _query_csv(["nvidia-smi", "--format=csv,noheader", "--query-gpu=gpu_uuid,index"])
+    )
+    processes = _query_csv(
+        [
+            "nvidia-smi",
+            "--format=csv,noheader",
+            "--query-compute-apps=gpu_uuid,pid,used_memory",
+        ]
+    )
+    return [
+        {"pid": pid, "index": gpu_index[gpu_uuid], "used_memory": used_memory}
+        for gpu_uuid, pid, used_memory in processes
+    ]
+
+
+def _containers() -> list[tuple[str, str]]:
+    """The running containers.
+
+    :return: `(container id, name)` per container.
+    """
+    rows = _query_csv(["docker", "stats", "--no-stream", "--format", "{{.Container}},{{.Name}}"])
+    return [(container_id, name) for container_id, name in rows]
+
+
+def _table_rows(
+    processes: list[dict[str, str]], containers: list[tuple[str, str]]
+) -> list[dict[str, str]]:
+    """The table: per container that uses a GPU, its own row and then one row per GPU process.
+
+    :param processes: every GPU process, from `_gpu_processes`.
+    :param containers: every running container, from `_containers`.
+    :return: the rows, each with every column of COLUMN_WIDTHS, blank where it does not apply.
+    """
+    rows: list[dict[str, str]] = []
+    for container_id, name in containers:
+        pids = _container_pids(container_id)
+        if pids is None:
+            continue
+
+        own = sorted(
+            (process for process in processes if process["pid"] in pids),
+            key=lambda process: (process["pid"], process["index"]),
+        )
+        if not own:
+            continue
+
+        rows.append({"Container": container_id, "Name": name, **dict.fromkeys(PROCESS_COLUMNS, "")})
+        rows.extend({**dict.fromkeys(CONTAINER_COLUMNS, ""), **process} for process in own)
+
+    return rows
+
+
+def _container_pids(container_id: str) -> set[str] | None:
+    """The host PIDs of every process in a container.
+
+    :param container_id: the container, as `docker stats` lists it.
+    :return: the PIDs, or None when docker cannot examine the container - it may have exited since
+        it was listed - in which case it is skipped with a warning rather than failing the table.
+    """
+    result = subprocess.run(
+        ["docker", "top", container_id, "-eo", "pid"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        print(f"Cannot examine container {container_id}, skipping ...", file=sys.stderr)
+        return None
+
+    return set(result.stdout.split()[1:])
+
+
+def _query_csv(command: list[str]) -> list[list[str]]:
+    """Run a command that prints comma-separated rows, and split them.
+
+    :param command: the command; its output has no header line.
+    :return: the rows, each a list of stripped fields.
+    :raises GpuStatError: if the command fails - typically docker without access to its daemon.
+    """
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        # nvidia-smi reports its errors on stdout, docker on stderr.
+        reason = (result.stderr or result.stdout).strip() or f"exit status {result.returncode}"
+        raise GpuStatError(f"`{' '.join(command[:2])}` failed: {reason}")
+
+    return [[field.strip() for field in line.split(",")] for line in result.stdout.splitlines()]
+
+
+def _render(rows: list[dict[str, str]]) -> str:
+    """The table as text: a header and the rows, every column right-aligned to its width.
+
+    :param rows: the rows, from `_table_rows`.
+    :return: the table, one line per row, without a trailing newline.
+    """
+
+    def cell(column: str, text: str) -> str:
+        """One cell, cut to the column's width and padded.
+
+        :param column: the column, a key of COLUMN_WIDTHS.
+        :param text: the value.
+        :return: the value, right-aligned.
+        """
+        width = COLUMN_WIDTHS[column]
+        if len(text) > width:
+            text = f"{text[:width]}..."
+        return f"{text:>{width + 3}}"
+
+    lines = [{column: column for column in COLUMN_WIDTHS}, *rows]
+    return "\n".join(
+        "\t".join(cell(column, line[column]) for column in COLUMN_WIDTHS) for line in lines
+    )
+
+
+if __name__ == "__main__":
+    main()

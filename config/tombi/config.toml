@@ -1,0 +1,25 @@
+# tombi, linked to ~/.config/tombi by bash-camp: tombi reads it wherever a project has no
+# tombi.toml of its own. tombi has no option to name a config file: `check` points
+# $XDG_CONFIG_HOME at bash-camp's config/ instead.
+toml-version = "v1.0.0"
+
+[files]
+include = ["*.toml", "**/*.toml"]
+exclude = [".git/**", ".pixi/**", "vendor/**", "dist/**", "build/**", "uv.lock"]
+
+[format.rules]
+line-width = 100
+
+[lint.rules]
+tables-out-of-order = "off"
+
+[[schemas]]
+path = "https://json.schemastore.org/pyproject.json"
+include = ["pyproject.toml", "**/pyproject.toml"]
+
+[schemas.lint.rules]
+deprecated = "off"
+
+[[schemas]]
+path = "https://json.schemastore.org/ruff.json"
+include = ["ruff.toml", "**/ruff.toml"]

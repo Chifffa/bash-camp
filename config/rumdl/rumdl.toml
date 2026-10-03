@@ -1,0 +1,31 @@
+# rumdl, linked to ~/.config/rumdl by bash-camp: the defaults `check` uses where a project has no
+# Markdown lint configuration.
+
+[global]
+exclude = [
+  ".git",
+  ".github",
+  "node_modules",
+  "vendor",
+  "dist",
+  "build",
+  ".pytest_cache",
+  "CHANGELOG.md",
+  "LICENSE.md",
+]
+respect-gitignore = true
+
+[MD004]
+style = "consistent"  # Unordered list style
+
+[MD007]
+indent = 4  # Unordered list indentation
+
+[MD013]
+line-length = 100
+code-blocks = true
+tables = false
+headings = true
+
+[per-file-ignores]
+"README.md" = ["MD033"]  # Inline HTML for badges and collapsible sections

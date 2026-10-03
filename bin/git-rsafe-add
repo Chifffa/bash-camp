@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# git-rsafe-add: mark every git repository under a directory as a git safe.directory.
+#
+# Usage: git-rsafe-add DIR
+set -euo pipefail
+
+die() {
+  echo "git-rsafe-add: $*" >&2
+  exit 1
+}
+
+(($# == 1)) || die "usage: git-rsafe-add DIR"
+[[ -d $1 ]] || die "$1 is not a directory."
+
+known=$(git config --global --get-all safe.directory || true)
+added=0
+while IFS= read -r -d '' git_dir; do
+  repo=${git_dir%/.git}
+  if ! grep -qxF -- "$repo" <<<"$known"; then
+    git config --global --add safe.directory "$repo"
+    echo "Added $repo"
+    added=$((added + 1))
+  fi
+done < <(find "$(realpath -s -- "$1")" -name .git -prune -print0)
+
+echo "$added repositories added."

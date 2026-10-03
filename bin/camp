@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# camp: bash-camp's command line; see `camp --help`.
+#
+# Runs the bootstrap.py of the bash-camp checkout the current directory is in, so that `camp pitch`
+# there installs or ships that checkout; elsewhere, the one next to this bin/ - $CAMP_HOME/src's,
+# once installed. `camp strike` always runs the latter: an installation is undone by the code that
+# made it, which knows its journal and its layout.
+set -euo pipefail
+
+tree=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd -P)
+
+# The root of the bash-camp checkout the current directory is in, if any.
+checkout() {
+  local dir
+  dir=$(pwd -P)
+  while [[ $dir != / ]]; do
+    if [[ -f $dir/bootstrap.py && -f $dir/camp/cli.py ]]; then
+      echo "$dir"
+      return 0
+    fi
+    dir=$(dirname -- "$dir")
+  done
+  return 1
+}
+
+if [[ ${1-} != strike ]] && found=$(checkout) && [[ $found != "$tree" ]]; then
+  echo "camp: using the checkout at $found" >&2
+  tree=$found
+fi
+exec python3 "$tree/bootstrap.py" "$@"

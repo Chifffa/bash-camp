@@ -1,0 +1,6 @@
+# lychee, linked to ~/.config/lychee by bash-camp: the defaults `check` uses where a project has no
+# lychee.toml.
+no_ignore = false
+hidden = false
+extensions = ["md", "txt", "html", "yml", "yaml"]
+accept = ["200", "429", "403", "202"]

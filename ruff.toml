@@ -1,0 +1,15 @@
+# bash-camp's own settings, on top of the shared config this repo installs into ~/.config/ruff.
+extend = "config/ruff/ruff.toml"
+
+# The oldest Python bash-camp supports; without a pyproject.toml ruff cannot tell.
+target-version = "py312"
+
+# Python scripts in bin/ have no .py suffix, so ruff has to be told about them.
+extend-include = ["bin/check", "bin/docker-gpu-stat"]
+
+[lint.extend-per-file-ignores]
+# A command-line tool: printing is its output.
+"bootstrap.py" = ["T201"]
+"camp/**" = ["T201"]
+"bin/check" = ["T201"]
+"bin/docker-gpu-stat" = ["T201"]

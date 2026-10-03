@@ -1,0 +1,8 @@
+# Only what pitch copies, and the props: edits elsewhere keep the cached layers.
+*
+!bootstrap.py
+!camp
+!bin
+!config
+!docs/demo/props.sh
+**/__pycache__

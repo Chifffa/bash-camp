@@ -1,0 +1,37 @@
+# Atuin, linked to ~/.config/atuin by bash-camp. Only deviations from `atuin default-config`.
+# The history database stays on each host, in ~/.local/share/atuin.
+
+# Never reach api.atuin.sh: on servers and in containers a network call at shell start is a hang.
+auto_sync = false
+update_check = false
+
+# Enter and Tab put the match on the command line instead of running it.
+enter_accept = false
+
+style = "compact"
+inline_height = 20
+filter_mode = "global"
+search_mode = "fuzzy"
+
+# Up searches the same history as Ctrl-R: a per-directory Up made every project look like it had
+# a history of its own. Ctrl-R in the search UI still narrows the filter.
+filter_mode_shell_up_key_binding = "global"
+inline_height_shell_up_key_binding = 10
+
+[preview]
+strategy = "auto"
+
+[stats]
+# Reported as "git push" rather than "git".
+common_subcommands = [
+  "apt",
+  "cargo",
+  "docker",
+  "git",
+  "kubectl",
+  "make",
+  "npm",
+  "pixi",
+  "systemctl",
+  "uv"
+]

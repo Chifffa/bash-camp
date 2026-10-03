@@ -1,0 +1,181 @@
+# Starship, linked to ~/.config/starship.toml by bash-camp.
+"$schema" = "https://starship.rs/config-schema.json"
+
+format = """
+[](red)\
+$hostname\
+$container\
+${env_var.TMUX}\
+$os\
+$username\
+[ ](bg:peach fg:red)\
+$directory\
+[ ](bg:yellow fg:peach)\
+$git_branch\
+$git_status\
+$git_state\
+[ ](fg:yellow bg:green)\
+$pixi\
+$conda\
+$golang\
+$python\
+[ ](fg:green bg:sapphire)\
+$cmd_duration\
+[ ](fg:sapphire bg:lavender)\
+$time\
+[ ](fg:lavender)
+ ❯ 
+"""
+
+# Catppuccin Frappé, like tmux and gitui. Other flavours: https://github.com/catppuccin/starship.
+palette = "catppuccin_frappe"
+
+[palettes.catppuccin_frappe]
+rosewater = "#f2d5cf"
+flamingo = "#eebebe"
+pink = "#f4b8e4"
+mauve = "#ca9ee6"
+red = "#e78284"
+maroon = "#ea999c"
+peach = "#ef9f76"
+yellow = "#e5c890"
+green = "#a6d189"
+teal = "#81c8be"
+sky = "#99d1db"
+sapphire = "#85c1dc"
+blue = "#8caaee"
+lavender = "#babbf1"
+text = "#c6d0f5"
+subtext1 = "#b5bfe2"
+subtext0 = "#a5adce"
+overlay2 = "#949cbb"
+overlay1 = "#838ba7"
+overlay0 = "#737994"
+surface2 = "#626880"
+surface1 = "#51576d"
+surface0 = "#414559"
+base = "#303446"
+mantle = "#292c3c"
+crust = "#232634"
+
+[username]
+show_always = true
+style_user = "bg:red fg:crust"
+style_root = "bg:red fg:crust"
+format = "[ $user ]($style)"
+
+[container]
+symbol = " "
+style = "bg:red fg:crust"
+format = "[$symbol]($style)"
+
+# Inside tmux.
+[env_var.TMUX]
+symbol = "󱃣 "
+style = "bg:red fg:crust"
+format = "[$symbol]($style)"
+
+[hostname]
+ssh_only = true
+trim_at = ""
+style = "bg:red fg:crust"
+format = "[󰣀 ]($style)"
+
+[os]
+style = "bg:red fg:crust"
+format = "[$symbol$version]($style)"
+disabled = false
+
+[os.symbols]
+Alpaquita = " "
+Alpine = " "
+AlmaLinux = " "
+Amazon = " "
+Android = " "
+Arch = " "
+Artix = " "
+CentOS = " "
+Debian = " "
+DragonFly = " "
+Emscripten = " "
+EndeavourOS = " "
+Fedora = " "
+FreeBSD = " "
+Garuda = "󰛓 "
+Gentoo = " "
+HardenedBSD = "󰞌 "
+Illumos = "󰈸 "
+Kali = " "
+Linux = " "
+Mabox = " "
+Macos = " "
+Manjaro = " "
+Mariner = " "
+MidnightBSD = " "
+Mint = " "
+NetBSD = " "
+NixOS = " "
+OpenBSD = "󰈺 "
+openSUSE = " "
+OracleLinux = "󰌷 "
+Pop = " "
+Raspbian = " "
+Redhat = " "
+RedHatEnterprise = " "
+RockyLinux = " "
+Redox = "󰀘 "
+Solus = "󰠳 "
+SUSE = " "
+Ubuntu = " "
+Unknown = " "
+Void = " "
+Windows = "󰍲 "
+
+[directory]
+style = "bg:peach fg:crust"
+format = "[$path]($style)"
+truncate_to_repo = true
+truncation_length = 3
+truncation_symbol = "…/"
+
+[cmd_duration]
+min_time = 2_000
+style = "bg:sapphire fg:crust"
+format = "[ 󱎫 $duration ]($style)"
+
+[git_branch]
+symbol = " "
+style = "bg:yellow fg:crust"
+format = "[$symbol$branch]($style)"
+
+[git_status]
+style = "bg:yellow fg:crust"
+format = "[$all_status$ahead_behind ]($style)"
+
+[golang]
+symbol = " "
+style = "bg:green fg:crust"
+format = "[$symbol($version) ]($style)"
+
+[python]
+symbol = " "
+style = "bg:green fg:crust"
+format = "[$symbol($version)]($style)"
+
+[pixi]
+symbol = "󱡄 "
+style = "bg:green fg:crust"
+format = "[$symbol$environment ]($style)"
+detect_files = []
+
+[conda]
+symbol = " "
+ignore_base = false
+style = "bg:green fg:crust"
+format = "[$symbol$environment ]($style)"
+
+[time]
+disabled = false
+time_format = "%R"
+style = "bg:lavender fg:crust"
+format = "[$time ]($style)"
