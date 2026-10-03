@@ -187,12 +187,7 @@ class Journal:
             remove_path(path, label=label)
 
         elif kind in ("symlink", "file"):
-            if kind == "symlink":
-                ours = path.is_symlink() and str(path.readlink()) == entry["target"]
-            else:
-                ours = exists(path) and not path.is_symlink() and digest(path) == entry["digest"]
-
-            if ours:
+            if is_ours(entry):
                 remove_path(path, label=label)
             elif exists(path):
                 print(f"  Kept {label}: it was changed after install.")
@@ -211,8 +206,35 @@ class Journal:
             warnings.warn(f"Unknown journal entry kind {kind!r} for {path}; skipped.", stacklevel=2)
 
         prune_empty_dirs(path.parent, Path(entry["keep"]))
+        self._hand_over_dirs(entry)
         self.entries.remove(entry)
         self.save()
+
+    def _hand_over_dirs(self, entry: JournalEntry) -> None:
+        """Make the directories an entry had to create the next entry's to prune, where one sits.
+
+        Uninstall reverts newest first, so by then nothing is left in them. `camp resupply` takes a
+        secret back out of that order, and a later one may still sit in a directory it created.
+
+        :param entry: the entry being reverted.
+        """
+        keep = Path(entry["keep"])
+        created = {parent for parent in Path(entry["path"]).parents if keep in parent.parents}
+        for other in self.entries:
+            if Path(other["keep"]) in created:
+                other["keep"] = str(keep)
+
+
+def is_ours(entry: JournalEntry) -> bool:
+    """Whether the path of a "symlink" or "file" entry still holds what install put there.
+
+    :param entry: a "symlink" or "file" entry.
+    :return: False when it is gone or was changed since.
+    """
+    path = Path(entry["path"])
+    if entry["kind"] == "symlink":
+        return path.is_symlink() and str(path.readlink()) == entry["target"]
+    return exists(path) and not path.is_symlink() and digest(path) == entry["digest"]
 
 
 def _restore_backup(entry: JournalEntry) -> None:

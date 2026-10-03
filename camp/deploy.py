@@ -1,10 +1,10 @@
-"""`camp pitch`, `strike` and `scout` with hosts: the same install, on remote hosts over ssh.
+"""`camp pitch`, `strike`, `scout` and `resupply` with hosts: the same, on remote hosts over ssh.
 
 A host is probed first and refused with the full list of its problems, so that a deploy never stops
 halfway through for a missing dependency. A host without rsync, or without Python 3.12+, gets a
 private one inside ~/.camp; git, tmux and make it gets from pixi like any host that lacks them.
 Then the source tree is rsynced into ~/.camp/src there and `camp pitch` runs from that copy,
-exactly as it would locally.
+exactly as it would locally. `camp resupply HOST` ships secrets/ alone, into an installation.
 """
 
 from __future__ import annotations
@@ -13,6 +13,8 @@ import dataclasses
 import shlex
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 
 from .model import CampError, SecretEntry
 from .paths import SOURCE_HOME, SOURCE_IGNORE_PATTERNS, SOURCE_ITEMS
@@ -24,13 +26,28 @@ from .toolchain import PIXI_CONFIG_TOML, PIXI_INSTALL_URL
 # home, and "$HOME" is expanded there.
 REMOTE_CAMP_HOME = '"$HOME/.camp"'
 REMOTE_SRC = ".camp/src/"
+REMOTE_SECRETS = ".camp/src/secrets/"
 REMOTE_BOOTSTRAP = '"$HOME/.camp/src/bootstrap.py"'
+REMOTE_JOURNAL = '"$HOME/.camp/state/journal.json"'
 
 # Where the probe looks for an rsync when the system has none: the shim an earlier install
 # published (rsync is one of the FALLBACK_TOOLS), then the one an earlier deploy brought.
 REMOTE_PRIVATE_RSYNCS = (
-    "$HOME/.camp/dev-tools/shims/rsync",
-    "$HOME/.camp/pixi/envs/rsync/bin/rsync",
+    '"$HOME/.camp/dev-tools/shims/rsync"',
+    '"$HOME/.camp/pixi/envs/rsync/bin/rsync"',
+)
+
+# Prints "rsync=" and the rsync to run on the host: the system's, else a private one; else nothing.
+REMOTE_FIND_RSYNC = "\n".join(
+    [
+        "if command -v rsync >/dev/null 2>&1; then",
+        '  echo "rsync=rsync"',
+        "else",
+        f"  for rsync in {' '.join(REMOTE_PRIVATE_RSYNCS)}; do",
+        '    if [ -x "$rsync" ]; then echo "rsync=$rsync"; break; fi',
+        "  done",
+        "fi",
+    ]
 )
 
 # The Python install runs on where the host's python3 is missing or older than REMOTE_MIN_PYTHON;
@@ -92,16 +109,7 @@ def deploy(hosts: list[str], check: bool, ssh_option: list[str]) -> int:
     if not check and shutil.which("rsync") is None:
         raise CampError("rsync is required locally to reach remote hosts. Install it first.")
 
-    entries = load_secrets_manifest(SOURCE_HOME / "secrets")
-    problems = missing_secret_sources(SOURCE_HOME / "secrets", entries)
-    if problems:
-        raise CampError("\n".join(problems))
-
-    shipped = [entry for entry in entries if not entry.local_only]
-    print(
-        f"Source: {SOURCE_HOME}; secrets: {len(shipped)} shipped,"
-        f" {len(entries) - len(shipped)} local-only kept back."
-    )
+    entries = _local_secrets()
 
     failed: list[str] = []
     for host in hosts:
@@ -118,6 +126,40 @@ def deploy(hosts: list[str], check: bool, ssh_option: list[str]) -> int:
         return 1
 
     print("All hosts checked." if check else "All hosts deployed.")
+    return 0
+
+
+def deploy_secrets(hosts: list[str], ssh_option: list[str]) -> int:
+    """`camp resupply HOST...`: update only the secrets of bash-camp on remote hosts, over ssh.
+
+    secrets/ goes alone, never the code: an installation stays the work of the code that made it,
+    and that code places the new secrets there as `camp resupply` does here.
+
+    :param hosts: the hosts, as ssh understands them.
+    :param ssh_option: extra `ssh -o` options.
+    :return: the exit status - 1 if any host failed.
+    :raises CampError: without a local rsync, or if the secrets manifest is broken.
+    """
+    if shutil.which("rsync") is None:
+        raise CampError("rsync is required locally to reach remote hosts. Install it first.")
+
+    entries = _local_secrets()
+
+    failed: list[str] = []
+    for host in hosts:
+        print(f"\n==> {host}")
+        try:
+            _resupply_host(host, ssh_option, entries)
+        except CampError as error:
+            print(f"  FAILED: {error}")
+            failed.append(host)
+
+    print()
+    if failed:
+        print(f"Failed: {', '.join(failed)}.")
+        return 1
+
+    print("All hosts resupplied.")
     return 0
 
 
@@ -260,20 +302,7 @@ def _deploy_host(
         print(f"  Using {rsync}.")
 
     print("  Syncing sources...")
-    rsync_command = [
-        "rsync",
-        "-az",
-        "--delete",
-        "--delete-excluded",
-        *([] if rsync == "rsync" else [f"--rsync-path={rsync}"]),
-        "-e",
-        shlex.join(_ssh_command(ssh_options)),
-        *_rsync_filters(entries),
-        f"{SOURCE_HOME}/",
-        f"{host}:{REMOTE_SRC}",
-    ]
-    if subprocess.run(rsync_command, check=False).returncode != 0:
-        raise CampError("rsync failed.")
+    _rsync(host, ssh_options, rsync, _rsync_filters(entries), SOURCE_HOME, REMOTE_SRC)
 
     print("  Installing...")
     _run_remote(
@@ -284,6 +313,71 @@ def _deploy_host(
     )
 
 
+def _resupply_host(host: str, ssh_options: list[str], entries: list[SecretEntry]) -> None:
+    """Sync secrets/ into the installation on one host, then place them there.
+
+    :param host: the host, as ssh understands it.
+    :param ssh_options: extra `ssh -o` options.
+    :param entries: the secrets manifest, for the local-only entries to keep back.
+    :raises CampError: if the host is unreachable or has no installation, or the sync or the remote
+        resupply fails.
+    """
+    rsync = _probe_installation(host, ssh_options)
+
+    print("  Syncing secrets...")
+    # What is excluded is deleted there too: a secret made local-only does not stay behind.
+    filters = [f"--exclude=/{entry.source}" for entry in entries if entry.local_only]
+    filters += [f"--exclude={pattern}" for pattern in SOURCE_IGNORE_PATTERNS]
+    secrets_dir = SOURCE_HOME / "secrets"
+    # Without a secrets/ here, an empty one goes, and takes the host's away.
+    with tempfile.TemporaryDirectory(prefix="bash-camp-") as empty_dir:
+        source = secrets_dir if secrets_dir.is_dir() else Path(empty_dir)
+        _rsync(host, ssh_options, rsync, filters, source, REMOTE_SECRETS)
+
+    print("  Placing secrets...")
+    _run_remote(
+        host,
+        ssh_options,
+        f'{REMOTE_PYTHON}; CAMP_HOME={REMOTE_CAMP_HOME} exec "$py" {REMOTE_BOOTSTRAP} resupply',
+        what="remote resupply",
+    )
+
+
+def _probe_installation(host: str, ssh_options: list[str]) -> str:
+    """Check that bash-camp is installed on a host, and find the rsync to sync its secrets with.
+
+    :param host: the host, as ssh understands it.
+    :param ssh_options: extra `ssh -o` options.
+    :return: the rsync to run there - "rsync" for the system's, else the path of a private one.
+    :raises CampError: if the host is unreachable, or has no installation, or no rsync.
+    """
+    script = "\n".join(
+        [
+            f"if [ ! -f {REMOTE_JOURNAL} ]; then",
+            "  echo 'bash-camp is not installed in ~/.camp; pitch it first.' >&2",
+            "  exit 1",
+            "fi",
+            REMOTE_FIND_RSYNC,
+        ]
+    )
+    result = subprocess.run(
+        [*_ssh_command(ssh_options), host, "sh -s"],
+        input=script,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise CampError(result.stderr.strip() or "unknown error")
+
+    found = [line for line in result.stdout.splitlines() if line.startswith("rsync=")]
+    if not found:
+        raise CampError("no rsync there, not even bash-camp's own; pitch it again.")
+
+    print("  Installation: OK.")
+    return found[0].removeprefix("rsync=")
+
+
 def _probe_host(host: str, ssh_options: list[str]) -> HostProbe:
     """Collect what deploy needs to know about a host, without changing it.
 
@@ -292,7 +386,6 @@ def _probe_host(host: str, ssh_options: list[str]) -> HostProbe:
     :return: what was found.
     :raises CampError: if the host is unreachable over ssh.
     """
-    private_rsyncs = " ".join(f'"{path}"' for path in REMOTE_PRIVATE_RSYNCS)
     script = "\n".join(
         [
             'missing=""',
@@ -300,13 +393,7 @@ def _probe_host(host: str, ssh_options: list[str]) -> HostProbe:
             '  command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"',
             "done",
             'echo "missing=$missing"',
-            "if command -v rsync >/dev/null 2>&1; then",
-            '  echo "rsync=rsync"',
-            "else",
-            f"  for rsync in {private_rsyncs}; do",
-            '    if [ -x "$rsync" ]; then echo "rsync=$rsync"; break; fi',
-            "  done",
-            "fi",
+            REMOTE_FIND_RSYNC,
             "if command -v python3 >/dev/null 2>&1; then",
             "  version=$(python3 -c 'import sys; print(\"%d.%d\" % sys.version_info[:2])')",
             '  echo "python=$version"',
@@ -349,6 +436,59 @@ def _probe_host(host: str, ssh_options: list[str]) -> HostProbe:
         arch=values.get("arch", ""),
         unreachable=unreachable,
     )
+
+
+def _local_secrets() -> list[SecretEntry]:
+    """Read and check the source tree's secrets manifest, and say what of it is shipped.
+
+    :return: the manifest's entries.
+    :raises CampError: if the manifest is broken or lists a missing source.
+    """
+    entries = load_secrets_manifest(SOURCE_HOME / "secrets")
+    problems = missing_secret_sources(SOURCE_HOME / "secrets", entries)
+    if problems:
+        raise CampError("\n".join(problems))
+
+    shipped = [entry for entry in entries if not entry.local_only]
+    print(
+        f"Source: {SOURCE_HOME}; secrets: {len(shipped)} shipped,"
+        f" {len(entries) - len(shipped)} local-only kept back."
+    )
+    return entries
+
+
+def _rsync(
+    host: str,
+    ssh_options: list[str],
+    rsync: str,
+    filters: list[str],
+    source: Path,
+    destination: str,
+) -> None:
+    """Mirror a local directory into a directory on a host, deleting there what it lacks.
+
+    :param host: the host, as ssh understands it.
+    :param ssh_options: extra `ssh -o` options.
+    :param rsync: the rsync to run there - "rsync" for the system's, else a path.
+    :param filters: rsync filter rules; what they exclude is deleted there too.
+    :param source: the local directory.
+    :param destination: the directory there, relative to the remote home, with a trailing slash.
+    :raises CampError: if rsync fails.
+    """
+    command = [
+        "rsync",
+        "-az",
+        "--delete",
+        "--delete-excluded",
+        *([] if rsync == "rsync" else [f"--rsync-path={rsync}"]),
+        "-e",
+        shlex.join(_ssh_command(ssh_options)),
+        *filters,
+        f"{source}/",
+        f"{host}:{destination}",
+    ]
+    if subprocess.run(command, check=False).returncode != 0:
+        raise CampError("rsync failed.")
 
 
 def _rsync_filters(entries: list[SecretEntry]) -> list[str]:

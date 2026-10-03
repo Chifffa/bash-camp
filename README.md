@@ -85,6 +85,8 @@ compiler, where there is one, builds its treesitter parsers and Telescope's fast
 | `camp pitch HOST...` | Check, ship and install on remote hosts over ssh |
 | `camp strike HOST...` | Uninstall on remote hosts |
 | `camp scout HOST...` | Only check that remote hosts have what an install needs |
+| `camp resupply` | Update only the secrets of the installation here, from `secrets/` |
+| `camp resupply HOST...` | Ship only `secrets/` to installed remote hosts and update theirs |
 | `tent` | Attach to the `tent` tmux session, creating it first; `tent strike` kills it |
 | `check [DIR]` | Run every linter on a tree; `--fix` formats and autofixes first, `--skip NAME`, `-v` for more output |
 | `docker-gpu-stat` | GPU usage per running Docker container |
@@ -163,6 +165,11 @@ Put your files into `secrets/` next to `bootstrap.py` (gitignored) and list them
 
 The manifest is validated before anything changes. See [`secrets.example/`](secrets.example/);
 `secrets.schema.json` gives editors completion.
+
+After changing them, `camp resupply` (here) or `camp resupply HOST...` brings an installation's
+secrets up to date without a reinstall: changed ones are updated, new ones placed, and the ones no
+longer listed taken back as `strike` would. A placed secret changed on that machine since is kept;
+delete it to take the new one. Only `secrets/` is shipped, never the code.
 
 ## Containers
 

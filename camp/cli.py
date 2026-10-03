@@ -6,6 +6,8 @@ Usage:
     camp pitch HOST...            # check, sync and install on remote hosts over ssh
     camp strike HOST...           # uninstall on remote hosts
     camp scout HOST...            # only check that remote hosts can take it
+    camp resupply                 # update only the secrets here, from secrets/
+    camp resupply HOST...         # update only the secrets on installed remote hosts
 
 Inside a bash-camp checkout, `camp` runs that checkout - that is how changes get installed or
 shipped - and says so; elsewhere, the installed copy in $CAMP_HOME/src. `camp strike` always runs
@@ -21,8 +23,8 @@ import argparse
 import inspect
 import sys
 
-from .deploy import deploy, undeploy
-from .install import install, uninstall
+from .deploy import deploy, deploy_secrets, undeploy
+from .install import install, resupply, uninstall
 from .model import CampError
 
 
@@ -53,6 +55,12 @@ def main() -> None:
     )
     _add_host_arguments(scout_parser, nargs="+")
     scout_parser.set_defaults(handler=_scout)
+
+    resupply_parser = subparsers.add_parser(
+        "resupply", help="Update only the secrets, here or on the given installed hosts"
+    )
+    _add_host_arguments(resupply_parser, nargs="*")
+    resupply_parser.set_defaults(handler=_resupply)
 
     args = parser.parse_args()
     if args.ssh_option and not args.hosts:
@@ -103,6 +111,18 @@ def _scout(hosts: list[str], ssh_option: list[str]) -> int:
     :return: the exit status.
     """
     return deploy(hosts, check=True, ssh_option=ssh_option)
+
+
+def _resupply(hosts: list[str], ssh_option: list[str]) -> int:
+    """Update only the secrets of the installation here, or on remote hosts.
+
+    :param hosts: the hosts; none to update here.
+    :param ssh_option: extra `ssh -o` options.
+    :return: the exit status.
+    """
+    if hosts:
+        return deploy_secrets(hosts, ssh_option)
+    return resupply()
 
 
 def _add_host_arguments(command_parser: argparse.ArgumentParser, *, nargs: str) -> None:

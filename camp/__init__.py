@@ -20,9 +20,9 @@ changed outside it goes through the journal.
 
     build.py             the steps that build inside $CAMP_HOME
     cli.py               the `camp` command line
-    deploy.py            pitch, strike and scout on remote hosts - the same install, over ssh
+    deploy.py            pitch, strike, scout and resupply on remote hosts - the same, over ssh
     home.py              the steps that change the home directory, each through the journal
-    install.py           the order of the steps, install and uninstall
+    install.py           the order of the steps, install, uninstall and resupply
     journal.py           the record of every change outside $CAMP_HOME, and how each is undone
     model.py             the types the modules hand to each other; imports nothing from here
     ops.py               the file and process primitives everything else is written in

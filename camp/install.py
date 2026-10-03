@@ -1,9 +1,9 @@
-"""install and uninstall - `camp pitch` and `camp strike` here - and the order the steps run in.
+"""install, uninstall and resupply - `camp pitch`, `strike` and `resupply` here - and their steps.
 
 The steps live in `build` (inside $CAMP_HOME, no journal) and `home` (outside it, through the
 journal). install never updates an installation in place: it uninstalls the earlier one first and
 builds everything afresh. `uninstall` has no steps of its own: it replays the journal backwards and
-deletes $CAMP_HOME.
+deletes $CAMP_HOME. resupply is the one update in place, of the secrets alone.
 """
 
 from __future__ import annotations
@@ -14,10 +14,13 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .build import (
     copy_source_tree,
+    install_env_files,
     install_rc_addon,
+    install_secrets,
     install_sources,
     setup_bash_plugins,
     setup_essentials,
@@ -30,6 +33,7 @@ from .home import (
     install_fonts,
     link_configs,
     place_secrets,
+    resupply_secrets,
     setup_tmux,
 )
 from .journal import Journal
@@ -55,6 +59,10 @@ from .secrets_manifest import load_secrets_manifest, missing_secret_sources
 from .toolchain import TOOL_STATE_PATHS
 
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
 # Frames the start and the end of install and uninstall.
 BANNER = "=" * 60
 
@@ -78,6 +86,13 @@ INSTALL_STEPS = (
     install_rc_addon,
     # Last: ~/.bashrc starts sourcing the addon once everything it refers to is in place.
     hook_bashrc,
+)
+
+# The steps of `camp resupply`: the secrets part of install, run against the existing journal.
+RESUPPLY_STEPS = (
+    install_secrets,
+    resupply_secrets,
+    install_env_files,
 )
 
 
@@ -113,13 +128,7 @@ def install() -> int:
     # $CAMP_HOME carries a copy of the secrets: owner-only, like ~/.ssh.
     CAMP_HOME.chmod(0o700)
     journal = Journal.create(camp_home_keep, carried)
-
-    for step_fn in INSTALL_STEPS:
-        print(f"\n>> {step_fn.__name__}")
-        if inspect.signature(step_fn).parameters:
-            step_fn(journal)
-        else:
-            step_fn()
+    _run_steps(INSTALL_STEPS, journal)
 
     print(f"\n{BANNER}")
     print("Installation complete.")
@@ -157,6 +166,49 @@ def uninstall() -> None:
     print("Uninstallation complete; the home directory is back to its pre-install state.")
     print("Open a new shell to pick up the change.")
     print(BANNER)
+
+
+def resupply() -> int:
+    """Update the secrets of the installation in $CAMP_HOME from this source tree, nothing else.
+
+    :return: the exit status.
+    :raises CampError: if bash-camp is not installed in $CAMP_HOME, or the secrets manifest is
+        broken or lists a missing source.
+    """
+    print(BANNER)
+    print(f"Resupplying the secrets of {CAMP_HOME}")
+    print(BANNER)
+
+    journal = Journal.load()
+    if journal is None:
+        raise CampError(f"bash-camp is not installed in {CAMP_HOME}; run `camp pitch` first.")
+
+    # Before the first change, so that a broken manifest leaves the installation as it was.
+    secrets_dir = SOURCE_HOME / "secrets"
+    problems = missing_secret_sources(secrets_dir, load_secrets_manifest(secrets_dir))
+    if problems:
+        raise CampError("\n".join(problems))
+
+    _run_steps(RESUPPLY_STEPS, journal)
+
+    print(f"\n{BANNER}")
+    print("Secrets resupplied. Open a new shell to pick up changed env files.")
+    print(BANNER)
+    return 0
+
+
+def _run_steps(steps: tuple[Callable[..., None], ...], journal: Journal) -> None:
+    """Run steps in order, handing the journal to those that take it.
+
+    :param steps: the steps.
+    :param journal: the journal of the installation.
+    """
+    for step_fn in steps:
+        print(f"\n>> {step_fn.__name__}")
+        if inspect.signature(step_fn).parameters:
+            step_fn(journal)
+        else:
+            step_fn()
 
 
 def _install_from_copy() -> int:

@@ -71,6 +71,28 @@ def install_sources() -> None:
             exe_path.chmod(exe_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def install_secrets() -> None:
+    """Replace the installed copy of secrets/ with the source tree's - all `camp resupply` copies.
+
+    Run from the installed copy - on a remote host, where `camp resupply HOST` has just rsynced
+    secrets/ into it - there is nothing to copy, only modes to tighten.
+    """
+    print("Copying secrets...")
+
+    source = SOURCE_HOME / "secrets"
+    if CAMP_SRC.resolve() == SOURCE_HOME:
+        print(f"  Running from {display(CAMP_SRC)}; its secrets are the ones placed.")
+    else:
+        remove_path(CAMP_SECRETS)
+        if source.is_dir():
+            ignore = shutil.ignore_patterns(*SOURCE_IGNORE_PATTERNS)
+            shutil.copytree(source, CAMP_SECRETS, ignore=ignore)
+        print(f"  Copied {source} -> {display(CAMP_SECRETS)}.")
+
+    if CAMP_SECRETS.is_dir():
+        restrict_tree(CAMP_SECRETS, file_mode=0o600)
+
+
 def copy_source_tree(destination: Path) -> None:
     """Copy SOURCE_ITEMS of the source tree, without caches.
 
@@ -228,14 +250,19 @@ def install_rc_addon() -> None:
     print("Installing RC addon...")
 
     rewrite_file(CAMP_RC_ADDON, CAMP_RC_ADDON_SOURCE.read_text())
+    print(f"  Installed {display(CAMP_RC_ADDON)}.")
+    install_env_files()
 
+
+def install_env_files() -> None:
+    """List the "load": "env" secrets in $CAMP_HOME/state/env-files, for the RC addon to export."""
     env_files = [
         str((CAMP_SECRETS / entry.source).relative_to(CAMP_HOME))
         for entry in load_secrets_manifest(CAMP_SECRETS)
         if entry.load == "env"
     ]
     rewrite_file(CAMP_ENV_FILES, "".join(f"{path}\n" for path in env_files))
-    print(f"  Installed {display(CAMP_RC_ADDON)}; it loads {len(env_files)} env file(s).")
+    print(f"  The RC addon loads {len(env_files)} env file(s).")
 
 
 def _silence_blesh_term_cache() -> None:

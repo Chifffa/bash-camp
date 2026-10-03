@@ -17,14 +17,15 @@ import tempfile
 import warnings
 from pathlib import Path
 
-from .journal import Journal
-from .model import CampError
+from .journal import Journal, is_ours
+from .model import CampError, SecretEntry
 from .ops import (
     digest,
     display,
     drop_lines_containing,
     exists,
     make_private_dirs,
+    remove_path,
     restrict_tree,
     rewrite_file,
     sh,
@@ -94,21 +95,56 @@ def place_secrets(journal: Journal) -> None:
     print("Placing secrets...")
 
     entries = load_secrets_manifest(CAMP_SECRETS)
-    placed = 0
-    for entry in entries:
-        if entry.target is None:
-            continue
-        source = CAMP_SECRETS / entry.source
-        if not exists(source):
-            if entry.local_only:
-                print(f"  Skipped {entry.source}: local-only and not present here.")
-                continue
-            raise CampError(f"{source} is listed in {SECRETS_MANIFEST} but does not exist.")
-        _place(journal, entry.target, source, entry.mode)
-        placed += 1
+    placeable = _placeable_secrets(entries)
+    for target, entry in placeable.items():
+        _place(journal, target, CAMP_SECRETS / entry.source, entry.mode)
 
     env_files = sum(1 for entry in entries if entry.load == "env")
-    print(f"  {placed} placed, {env_files} env file(s) loaded by the RC addon.")
+    print(f"  {len(placeable)} placed, {env_files} env file(s) loaded by the RC addon.")
+
+
+def resupply_secrets(journal: Journal) -> None:
+    """Bring the placed secrets in line with secrets/manifest.json, and nothing else.
+
+    It ends where installing again would, without the reinstall: a secret no longer listed, or
+    local-only and absent here, is taken back as uninstall takes it back; one still listed is copied
+    over in place, the backup of what it displaced kept for uninstall; a new one is placed as
+    install places it. A placed secret changed here since is kept, as uninstall keeps it.
+
+    :param journal: the journal of the installation.
+    :raises CampError: if a listed source is missing and not local-only.
+    """
+    print("Resupplying secrets...")
+
+    entries = load_secrets_manifest(CAMP_SECRETS)
+    wanted = _placeable_secrets(entries)
+    placed = {Path(entry["path"]): entry for entry in journal.entries if entry["kind"] == "file"}
+
+    # Newest first, as uninstall goes: a later secret may sit in a directory an earlier one made.
+    for path, journal_entry in reversed(placed.items()):
+        if path not in wanted:
+            journal.revert(journal_entry)
+
+    unchanged = 0
+    for target, entry in wanted.items():
+        source = CAMP_SECRETS / entry.source
+        journal_entry = placed.get(target)
+        if journal_entry is None:
+            _place(journal, target, source, entry.mode)
+        elif exists(target) and not is_ours(journal_entry):
+            print(f"  Kept {display(target)}: it was changed since; delete it to take the new one.")
+        else:
+            previous = journal_entry["digest"] if exists(target) else None
+            remove_path(target)
+            _copy_secret(target, source, entry.mode)
+            journal.update(journal_entry, digest=digest(target))
+            if journal_entry["digest"] == previous:
+                unchanged += 1
+            else:
+                print(f"  Updated {display(target)} ({entry.mode:03o}).")
+
+    env_files = sum(1 for entry in entries if entry.load == "env")
+    print(f"  {unchanged} unchanged, {env_files} env file(s) loaded by the RC addon.")
 
 
 def setup_tmux(journal: Journal) -> None:
@@ -295,6 +331,19 @@ def _place(journal: Journal, target: Path, source: Path, mode: int) -> None:
     backup = journal.displace(target) if exists(target) else None
     entry = journal.add("file", target, digest=None, backup=str(backup) if backup else None)
 
+    _copy_secret(target, source, mode)
+
+    journal.update(entry, digest=digest(target))
+    print(f"  Placed {display(target)} ({mode:03o}).")
+
+
+def _copy_secret(target: Path, source: Path, mode: int) -> None:
+    """Copy a secret file or directory to a free target, owner-only.
+
+    :param target: where the copy goes; nothing may sit there.
+    :param source: the file or directory in $CAMP_HOME/src/secrets.
+    :param mode: permissions of the copied files; directories get 0700.
+    """
     make_private_dirs(target.parent)
     if source.is_dir():
         shutil.copytree(source, target)
@@ -303,8 +352,26 @@ def _place(journal: Journal, target: Path, source: Path, mode: int) -> None:
         shutil.copyfile(source, target)
         target.chmod(mode)
 
-    journal.update(entry, digest=digest(target))
-    print(f"  Placed {display(target)} ({mode:03o}).")
+
+def _placeable_secrets(entries: list[SecretEntry]) -> dict[Path, SecretEntry]:
+    """The manifest's entries that are placed here: those with a target and a source present.
+
+    :param entries: the manifest's entries.
+    :return: the entries by target, in manifest order.
+    :raises CampError: if a listed source is missing and not local-only.
+    """
+    placeable: dict[Path, SecretEntry] = {}
+    for entry in entries:
+        if entry.target is None:
+            continue
+        source = CAMP_SECRETS / entry.source
+        if not exists(source):
+            if entry.local_only:
+                print(f"  Skipped {entry.source}: local-only and not present here.")
+                continue
+            raise CampError(f"{source} is listed in {SECRETS_MANIFEST} but does not exist.")
+        placeable[entry.target] = entry
+    return placeable
 
 
 def _tmux_plugin_names() -> list[str]:
