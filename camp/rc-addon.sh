@@ -30,14 +30,15 @@ export LOGNAME=${LOGNAME:-$USER}
 
 # --- SSH agent ------------------------------------------------------------------------------------
 # Shells export the stable link ~/.ssh/ssh_auth_sock, so tmux panes outlive the login's socket. A
-# login re-aims it at its own socket, except sshd's per-session one (it dies with the connection)
-# and one that already is the link's target - compared by inode, since a container spells the same
-# file differently and a link aimed at itself fails with ELOOP. A dead link heals to the keyring.
+# login re-aims it at its own socket, except sshd's per-session one (it dies with the connection;
+# in ~/.ssh/agent since OpenSSH 10.1, in /tmp before) and one that already is the link's target -
+# compared by inode, since a container spells the same file differently and a link aimed at itself
+# fails with ELOOP. A dead link heals to the keyring.
 __camp_link=$HOME/.ssh/ssh_auth_sock
 __camp_keyring=/run/user/$(id -u)/keyring/ssh
 __camp_inode() { stat -Lc %d:%i -- "$1" 2>/dev/null; }
 if [[ -z ${TMUX-} && -S ${SSH_AUTH_SOCK-} && $SSH_AUTH_SOCK != "$__camp_link" ]] &&
-  [[ $SSH_AUTH_SOCK != /tmp/ssh-*/agent.* ]] &&
+  [[ $SSH_AUTH_SOCK != /tmp/ssh-*/agent.* && $SSH_AUTH_SOCK != */.ssh/agent/s.*.sshd.* ]] &&
   [[ $(__camp_inode "$SSH_AUTH_SOCK") != "$(__camp_inode "$__camp_link")" ]]; then
   mkdir -p -- "${__camp_link%/*}"
   ln -sfn -- "$SSH_AUTH_SOCK" "$__camp_link"
