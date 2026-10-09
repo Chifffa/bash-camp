@@ -30,28 +30,32 @@ export LOGNAME=${LOGNAME:-$USER}
 
 # --- SSH agent ------------------------------------------------------------------------------------
 # Shells export the stable link ~/.ssh/ssh_auth_sock, so tmux panes outlive the login's socket. A
-# login re-aims it at its own socket, except sshd's per-session one (it dies with the connection;
-# in ~/.ssh/agent since OpenSSH 10.1, in /tmp before) and one that already is the link's target -
-# compared by inode, since a container spells the same file differently and a link aimed at itself
-# fails with ELOOP. A dead link heals to the keyring.
+# dead link first heals to the keyring. Then a login re-aims it at its own socket, unless that
+# already is the link's target - compared by inode, since a container spells the same file
+# differently and a link aimed at itself fails with ELOOP. A forwarded agent, sshd's per-session
+# socket (in ~/.ssh/agent since OpenSSH 10.1, in /tmp before), dies with its connection: it takes
+# the link from another login's forwarded agent, the newest login winning, but never from a live
+# agent of the machine's own, such as the keyring.
 __camp_link=$HOME/.ssh/ssh_auth_sock
 __camp_keyring=/run/user/$(id -u)/keyring/ssh
 __camp_inode() { stat -Lc %d:%i -- "$1" 2>/dev/null; }
-if [[ -z ${TMUX-} && -S ${SSH_AUTH_SOCK-} && $SSH_AUTH_SOCK != "$__camp_link" ]] &&
-  [[ $SSH_AUTH_SOCK != /tmp/ssh-*/agent.* && $SSH_AUTH_SOCK != */.ssh/agent/s.*.sshd.* ]] &&
-  [[ $(__camp_inode "$SSH_AUTH_SOCK") != "$(__camp_inode "$__camp_link")" ]]; then
-  mkdir -p -- "${__camp_link%/*}"
-  ln -sfn -- "$SSH_AUTH_SOCK" "$__camp_link"
-fi
+__camp_forwarded() { [[ $1 == /tmp/ssh-*/agent.* || $1 == */.ssh/agent/s.*.sshd.* ]]; }
 if [[ -L $__camp_link && ! -e $__camp_link && -S $__camp_keyring ]]; then
   ln -sfn -- "$__camp_keyring" "$__camp_link"
+fi
+if [[ -z ${TMUX-} && -S ${SSH_AUTH_SOCK-} && $SSH_AUTH_SOCK != "$__camp_link" ]] &&
+  [[ $(__camp_inode "$SSH_AUTH_SOCK") != "$(__camp_inode "$__camp_link")" ]] &&
+  { ! __camp_forwarded "$SSH_AUTH_SOCK" || [[ ! -S $__camp_link ]] ||
+    __camp_forwarded "$(readlink -- "$__camp_link")"; }; then
+  mkdir -p -- "${__camp_link%/*}"
+  ln -sfn -- "$SSH_AUTH_SOCK" "$__camp_link"
 fi
 # The session keeps its own live socket only while the link is beyond repair.
 if [[ -S $__camp_link || ! -S ${SSH_AUTH_SOCK-} ]]; then
   export SSH_AUTH_SOCK=$__camp_link
 fi
 unset __camp_link __camp_keyring
-unset -f __camp_inode
+unset -f __camp_inode __camp_forwarded
 
 # --- PATH -----------------------------------------------------------------------------------------
 # Prepend moves an existing entry to the front, so re-sourcing neither duplicates nor reorders.
