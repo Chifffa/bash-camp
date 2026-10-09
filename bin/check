@@ -1,33 +1,49 @@
 #!/usr/bin/env python3
-"""check: run every linter and format check on a source tree, with or without git.
+"""check: run every linter and format check on files and source trees, with or without git.
 
 Runs ruff, flake8 with wemake-python-styleguide, shellcheck, rumdl, tombi, yamlfmt, stylua and
-lychee, each in the tree, so that it reads the project's own configuration. Where a project has
-none, the tool gets bash-camp's default from config/ (ruff finds its own in ~/.config, where
-`camp pitch` links it). A tool with no files to look at is skipped. In a git work tree, what git
-ignores is left out; without git, everything but SKIP_DIRS is checked.
+lychee in the project the paths belong to, so that each reads the project's own configuration.
+Where a project has none, the tool gets bash-camp's default from config/ (ruff finds its own in
+~/.config, where `camp pitch` links it). A tool with no files to look at is skipped.
+
+The files are chosen here, once, and every tool gets that list: what --exclude leaves out is left
+out everywhere. In a tree, what git ignores and SKIP_DIRS are left out as well; a file named on the
+command line is checked even so. Each tool still applies the excludes of its own configuration.
 
 The Python tools come through uvx at pinned versions; yamlfmt, stylua and lychee from bash-camp's
 toolchain.
 
 Usage:
-    check [DIR]              # check DIR, by default the current directory
-    check --fix [DIR]        # apply formatters and autofixes first, then check
-    check --skip lychee      # leave a checker out; repeatable
-    check -v [DIR]           # more output from every checker that has it, and each command shown
+    check [PATH...]               # check files and trees, by default the current directory
+    check --exclude PATTERN ...   # leave out files and directories; repeatable
+    check --fix [PATH...]         # apply formatters and autofixes first, then check
+    check --skip lychee           # leave a checker out; repeatable
+    check -v [PATH...]            # more output from every checker that has it, and each command
+
+A PATTERN with a "/" is a path from the current directory, as PATH is; without one, it is a name,
+matched at any depth below the project. Both take globs: "*", "?" and "[...]" within a name, "**"
+for any number of directories. A directory that matches is left out with everything in it:
+    check --exclude tests/fixtures --exclude '*_pb2.py' src tests README.md
 """
 
 from __future__ import annotations
 
 import argparse
+import configparser
 import dataclasses
+import fnmatch
 import os
 import re
 import shlex
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 
 # Pinned, so that every machine reports the same.
@@ -50,12 +66,9 @@ SHELLCHECK = ("uvx", "-q", "--from", "shellcheck-py==0.11.0.1", "shellcheck")
 # bash-camp's config/, next to this bin/: the checkout's, or $CAMP_HOME/src/config once installed.
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
 
-# Stand-ins in a command: FILES for the checker's files; SCRIPTS for those among them that have no
-# suffix and are only recognized by their shebang, which tools finding files themselves miss;
-# CONFIG for the default configuration, where the project has none; VERBOSE for the tool's flag for
-# more output, under -v.
+# Stand-ins in a command: FILES for the checker's files; CONFIG for the default configuration,
+# where the project has none; VERBOSE for the tool's flag for more output, under -v.
 FILES = "<files>"
-SCRIPTS = "<scripts>"
 CONFIG = "<config>"
 VERBOSE = "<verbose>"
 
@@ -88,15 +101,26 @@ SUFFIXES = {
     ".sh": "shell",
     ".bash": "shell",
     ".md": "markdown",
+    ".markdown": "markdown",
     ".toml": "toml",
     ".yaml": "yaml",
     ".yml": "yaml",
     ".lua": "lua",
+    ".txt": "text",
+    ".html": "html",
+    ".htm": "html",
 }
 SHEBANGS = (
     (re.compile(rb"^#!.*\bpython[0-9.]*\b"), "python"),
     (re.compile(rb"^#!\s*\S*/(?:env\s+)?(?:ba|da|k)?sh\b"), "shell"),
 )
+
+# flake8's own exclude, where its configuration sets none.
+FLAKE8_EXCLUDE = ".svn,CVS,.bzr,.hg,.git,__pycache__,.tox,.nox,.eggs,*.egg"
+
+# What an argument takes on a command line besides its bytes: a NUL and a pointer. The files get
+# half of what the system allows, less the environment; more run in batches.
+ARG_COST = 9
 
 
 @dataclasses.dataclass(frozen=True)
@@ -108,7 +132,7 @@ class DefaultConfig:
             which is pointed at the default through $XDG_CONFIG_HOME instead.
         path: the default, relative to CONFIG_DIR.
         project: where a project would configure the tool: file names, or "file:[section]" for a
-            section of a shared file.
+            section of a shared file; the first one present is the one the tool reads.
     """
 
     option: str | None
@@ -122,23 +146,84 @@ class Checker:
 
     Attributes:
         name: what --skip and the summary call it.
-        kind: the files it looks at: "python", "shell", "markdown", "toml", "yaml" or "lua".
+        kinds: the files it looks at: "python", "shell", "markdown", "toml", "yaml", "lua", "text"
+            or "html".
         check: the command that only reports.
         fix: the command that rewrites the files, or None.
         config: the default configuration, for the CONFIG stand-in.
         verbose: the tool's flag for more output, for the VERBOSE stand-in.
+        suffixes: only the files with these suffixes, "" for none; None for all of its kinds.
+        own_excludes: for a tool that applies the excludes of its configuration only in the trees
+            it walks, never to the files it is given: reads them from its configuration file, as
+            fnmatch patterns for a name or an absolute path.
     """
 
     name: str
-    kind: str
+    kinds: tuple[str, ...]
     check: tuple[str, ...]
     fix: tuple[str, ...] | None = None
     config: DefaultConfig | None = None
     verbose: str = "-v"
+    suffixes: tuple[str, ...] | None = None
+    own_excludes: Callable[[Path], list[str]] | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class Excludes:
+    """What --exclude leaves out.
+
+    Attributes:
+        names: patterns for the name of a file or directory, at any depth below the project.
+        paths: patterns for an absolute path, one per name, or "**" for any number of them.
+    """
+
+    names: tuple[str, ...]
+    paths: tuple[tuple[str, ...], ...]
+
+
+@dataclasses.dataclass
+class Selection:
+    """The files to check.
+
+    Attributes:
+        root: the project's directory; the tools run in it.
+        files: kind -> paths relative to root.
+        unknown: files named on the command line that no checker looks at.
+    """
+
+    root: Path
+    files: dict[str, set[str]] = dataclasses.field(default_factory=dict)
+    unknown: list[str] = dataclasses.field(default_factory=list)
+
+
+def _flake8_excludes(config_file: Path) -> list[str]:
+    """flake8's exclude patterns, as its configuration sets them.
+
+    :param config_file: the configuration flake8 reads.
+    :return: the patterns; one with a "/" is made absolute, from the configuration's directory,
+        as flake8 does.
+    """
+    parser = configparser.RawConfigParser()
+    try:
+        parser.read(config_file)
+    except configparser.Error:
+        return _split_list(FLAKE8_EXCLUDE)
+
+    options = dict(parser.items("flake8")) if parser.has_section("flake8") else {}
+    raw = _split_list(options.get("exclude", FLAKE8_EXCLUDE))
+    raw += _split_list(options.get("extend-exclude", options.get("extend_exclude", "")))
+    patterns = [pattern.rstrip("/") for pattern in raw]
+    return [
+        os.path.normpath(config_file.parent / pattern) if "/" in pattern else pattern
+        for pattern in patterns
+    ]
 
 
 FLAKE8_CONFIG = DefaultConfig(
-    "--config", "flake8/flake8.ini", (".flake8", "setup.cfg:[flake8]", "tox.ini:[flake8]")
+    "--config",
+    "flake8/flake8.ini",
+    # flake8's own order.
+    ("setup.cfg:[flake8]", "tox.ini:[flake8]", ".flake8:[flake8]"),
 )
 RUMDL_CONFIG = DefaultConfig(
     "--config",
@@ -172,56 +257,85 @@ TOMBI_CONFIG = DefaultConfig(
 CHECKERS = (
     Checker(
         "ruff-format",
-        "python",
-        (*RUFF, "format", VERBOSE, "--check", "--force-exclude", ".", SCRIPTS),
-        (*RUFF, "format", VERBOSE, "--force-exclude", ".", SCRIPTS),
+        ("python",),
+        (*RUFF, "format", VERBOSE, "--check", "--force-exclude", FILES),
+        (*RUFF, "format", VERBOSE, "--force-exclude", FILES),
     ),
     Checker(
         "ruff-check",
-        "python",
-        (*RUFF, "check", VERBOSE, "--force-exclude", ".", SCRIPTS),
-        (*RUFF, "check", VERBOSE, "--fix", "--force-exclude", ".", SCRIPTS),
+        ("python",),
+        (*RUFF, "check", VERBOSE, "--force-exclude", FILES),
+        (*RUFF, "check", VERBOSE, "--fix", "--force-exclude", FILES),
     ),
+    # flake8 looks at *.py only, and at scripts without a suffix it is given.
     Checker(
-        "flake8", "python", (*FLAKE8, "flake8", VERBOSE, CONFIG, ".", SCRIPTS), config=FLAKE8_CONFIG
+        "flake8",
+        ("python",),
+        (*FLAKE8, "flake8", VERBOSE, CONFIG, FILES),
+        config=FLAKE8_CONFIG,
+        suffixes=(".py", ""),
+        own_excludes=_flake8_excludes,
     ),
     # shellcheck has no flag for more output.
-    Checker("shellcheck", "shell", (*SHELLCHECK, FILES)),
+    Checker("shellcheck", ("shell",), (*SHELLCHECK, FILES)),
     Checker(
         "rumdl",
-        "markdown",
-        (*RUMDL, "check", VERBOSE, CONFIG, "."),
-        (*RUMDL, "fmt", VERBOSE, CONFIG, "."),
+        ("markdown",),
+        (*RUMDL, "check", VERBOSE, CONFIG, FILES),
+        (*RUMDL, "fmt", VERBOSE, CONFIG, FILES),
         config=RUMDL_CONFIG,
     ),
     Checker(
         "tombi-format",
-        "toml",
-        (*TOMBI, "format", VERBOSE, "--check"),
-        (*TOMBI, "format", VERBOSE),
+        ("toml",),
+        (*TOMBI, "format", VERBOSE, "--check", FILES),
+        (*TOMBI, "format", VERBOSE, FILES),
         config=TOMBI_CONFIG,
     ),
-    Checker("tombi-lint", "toml", (*TOMBI, "lint", VERBOSE), config=TOMBI_CONFIG),
+    Checker("tombi-lint", ("toml",), (*TOMBI, "lint", VERBOSE, FILES), config=TOMBI_CONFIG),
     Checker(
         "yamlfmt",
-        "yaml",
+        ("yaml",),
         ("yamlfmt", CONFIG, VERBOSE, "-lint", FILES),
         ("yamlfmt", CONFIG, VERBOSE, FILES),
         config=YAMLFMT_CONFIG,
         verbose="-verbose",
     ),
+    # stylua leaves out what .styluaignore lists only with --respect-ignores.
     Checker(
         "stylua",
-        "lua",
-        ("stylua", CONFIG, VERBOSE, "--check", FILES),
-        ("stylua", CONFIG, VERBOSE, FILES),
+        ("lua",),
+        ("stylua", CONFIG, VERBOSE, "--respect-ignores", "--check", FILES),
+        ("stylua", CONFIG, VERBOSE, "--respect-ignores", FILES),
         config=STYLUA_CONFIG,
     ),
+    # The kinds of bash-camp's lychee.toml `extensions`.
     Checker(
         "lychee",
-        "markdown",
-        ("lychee", CONFIG, VERBOSE, "--no-progress", "."),
+        ("markdown", "text", "html", "yaml"),
+        ("lychee", CONFIG, VERBOSE, "--no-progress", "--", FILES),
         config=LYCHEE_CONFIG,
+    ),
+)
+
+# What marks the directory of a project: version control, or a tool's configuration.
+PROJECT_MARKERS = (
+    ".git",
+    ".hg",
+    "pyproject.toml",
+    "ruff.toml",
+    ".ruff.toml",
+    *dict.fromkeys(
+        place.partition(":")[0]
+        for config in (
+            FLAKE8_CONFIG,
+            RUMDL_CONFIG,
+            YAMLFMT_CONFIG,
+            LYCHEE_CONFIG,
+            STYLUA_CONFIG,
+            TOMBI_CONFIG,
+        )
+        for place in config.project
     ),
 )
 
@@ -230,10 +344,27 @@ def main() -> None:
     """CLI entry point: run the checks, print a summary, exit 1 if any failed."""
     names = [checker.name for checker in CHECKERS]
     parser = argparse.ArgumentParser(
-        description="Run every linter and format check on a source tree.",
+        description="Run every linter and format check on files and source trees.",
         epilog=f"Checkers: {', '.join(names)}.",
     )
-    parser.add_argument("dir", nargs="?", default=".", type=Path, help="the tree to check")
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        default=[Path()],
+        type=Path,
+        metavar="PATH",
+        help="a file or a tree to check; by default the current directory",
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help=(
+            "leave out a file or directory, everywhere: a path from the current directory if it "
+            "has a '/', else a name at any depth; globs and '**' work; repeatable"
+        ),
+    )
     parser.add_argument("--fix", action="store_true", help="apply fixes first, then check")
     parser.add_argument(
         "--skip", action="append", default=[], choices=names, metavar="NAME", help="skip a checker"
@@ -244,64 +375,176 @@ def main() -> None:
         action="store_true",
         help="more output from every checker that has it (all but shellcheck), and each command",
     )
-    args = parser.parse_args()
+    args = parser.parse_intermixed_args()
 
-    root = args.dir.resolve()
-    if not root.is_dir():
-        sys.exit(f"check: {args.dir} is not a directory.")
+    for path in args.paths:
+        if not path.is_dir() and not path.is_file():
+            parser.error(f"{path}: no such file or directory")
 
-    files = _find_files(root, _git_ignored(root))
+    selection = _select(
+        [path.resolve() for path in args.paths], _parse_excludes(args.exclude, Path.cwd())
+    )
+    if selection.unknown:
+        print(f"check: no checker for {', '.join(selection.unknown)}", file=sys.stderr)
+    if selection.root != Path.cwd():
+        print(f"check: in {selection.root}", flush=True)
+
     results = [
-        (checker.name, _run(checker, root, files, fix=args.fix, verbose=args.verbose))
+        (checker.name, _run(checker, selection, fix=args.fix, verbose=args.verbose))
         for checker in CHECKERS
         if checker.name not in args.skip
     ]
 
     print("\nSummary:")
-    for name, result in results:
-        print(f"  {name:<14}{result}")
-    if any(result in ("FAILED", "unavailable") for _, result in results):
+    for name, (status, detail) in results:
+        print(f"  {name:<14}{status} ({detail})")
+    if any(status in ("FAILED", "unavailable") for _, (status, _detail) in results):
         sys.exit(1)
 
 
-def _find_files(root: Path, ignored: frozenset[str]) -> dict[str, list[str]]:
-    """Every file a checker could look at, by kind.
+def _parse_excludes(patterns: list[str], cwd: Path) -> Excludes:
+    """The --exclude patterns, sorted into names and paths.
 
-    :param root: the tree.
-    :param ignored: paths to leave out, relative to root; directories end with "/".
-    :return: kind -> paths relative to root, sorted; a kind without files is absent.
+    :param patterns: the patterns.
+    :param cwd: the directory paths are relative to.
+    :return: the patterns; paths made absolute.
     """
-    found: dict[str, list[str]] = {}
-    for current, dirs, names in os.walk(root):
-        relative = Path(current).relative_to(root)
+    names: list[str] = []
+    paths: list[tuple[str, ...]] = []
+    for pattern in patterns:
+        stripped = pattern.rstrip("/")
+        if "/" in stripped:
+            absolute = os.path.normpath(cwd / Path(stripped).expanduser())
+            paths.append(PurePosixPath(absolute).parts)
+        elif stripped:
+            names.append(stripped)
+    return Excludes(tuple(names), tuple(paths))
+
+
+def _select(paths: list[Path], excludes: Excludes) -> Selection:
+    """Every file a checker could look at, among the paths given.
+
+    :param paths: files and trees, absolute.
+    :param excludes: what to leave out.
+    :return: the files, by kind, relative to the project they belong to.
+    """
+    top = Path(os.path.commonpath([path if path.is_dir() else path.parent for path in paths]))
+    selection = Selection(_project_root(top))
+    for path in paths:
+        if path.is_dir():
+            _add_tree(selection, path, excludes)
+        elif not _excluded(path, selection.root, excludes):
+            kind = _kind(path)
+            if kind is None:
+                selection.unknown.append(_relative(path, selection.root))
+            else:
+                selection.files.setdefault(kind, set()).add(_relative(path, selection.root))
+    return selection
+
+
+def _add_tree(selection: Selection, tree: Path, excludes: Excludes) -> None:
+    """Add the files of a tree, but what git ignores, SKIP_DIRS and the excludes.
+
+    :param selection: where the files go.
+    :param tree: the tree.
+    :param excludes: what to leave out.
+    """
+    if _excluded(tree, selection.root, excludes):
+        return
+
+    ignored = _git_ignored(tree)
+    for current, dirs, names in os.walk(tree):
+        relative = Path(current).relative_to(tree)
         dirs[:] = sorted(
             name
             for name in dirs
-            if name not in SKIP_DIRS and f"{(relative / name).as_posix()}/" not in ignored
+            if name not in SKIP_DIRS
+            and f"{(relative / name).as_posix()}/" not in ignored
+            and not _excluded(Path(current, name), selection.root, excludes)
         )
         for name in names:
             path = Path(current, name)
-            kind = SUFFIXES.get(path.suffix) if path.suffix else _shebang_kind(path)
-            if kind is None or path.is_symlink() or (relative / name).as_posix() in ignored:
+            if (
+                path.is_symlink()
+                or (relative / name).as_posix() in ignored
+                or _excluded(path, selection.root, excludes)
+            ):
                 continue
-            found.setdefault(kind, []).append(str(path.relative_to(root)))
+            kind = _kind(path)
+            if kind is not None:
+                selection.files.setdefault(kind, set()).add(_relative(path, selection.root))
 
-    return {kind: sorted(paths) for kind, paths in found.items()}
+
+def _project_root(top: Path) -> Path:
+    """The directory of the project a tree belongs to, which its tools are run in.
+
+    :param top: the tree, where the paths given meet.
+    :return: the nearest directory, from top up, with version control or a configuration of one
+        of the tools, the home directory not included; top itself where there is none.
+    """
+    home = Path.home()
+    for directory in (top, *top.parents):
+        if directory == home and directory != top:
+            break
+
+        if any((directory / marker).exists() for marker in PROJECT_MARKERS):
+            return directory
+
+    return top
 
 
-def _git_ignored(root: Path) -> frozenset[str]:
-    """What git ignores in the tree, as the tools that read .gitignore themselves see it.
+def _excluded(path: Path, root: Path, excludes: Excludes) -> bool:
+    """Whether --exclude leaves a file or directory out.
 
-    :param root: the tree.
-    :return: paths relative to root, directories with a trailing "/"; empty without git or outside
-        a work tree.
+    :param path: the file or directory, absolute.
+    :param root: the project's directory; names match below it.
+    :param excludes: the patterns.
+    :return: True when a name in the path below root, or the path itself or a directory above it,
+        matches.
+    """
+    if excludes.names:
+        try:
+            below_root = path.relative_to(root).parts
+        except ValueError:
+            below_root = (path.name,)
+
+        if any(fnmatch.fnmatchcase(part, name) for part in below_root for name in excludes.names):
+            return True
+
+    return any(_path_matches(PurePosixPath(path).parts, pattern) for pattern in excludes.paths)
+
+
+def _path_matches(parts: tuple[str, ...], pattern: tuple[str, ...]) -> bool:
+    """Whether a path, or a directory above it, matches a pattern.
+
+    :param parts: the path's names.
+    :param pattern: the pattern's names: globs, or "**" for any number of names.
+    :return: True on a match.
+    """
+    if not pattern:
+        return True
+    if pattern[0] == "**":
+        return any(_path_matches(parts[skip:], pattern[1:]) for skip in range(len(parts) + 1))
+    return (
+        bool(parts)
+        and fnmatch.fnmatchcase(parts[0], pattern[0])
+        and _path_matches(parts[1:], pattern[1:])
+    )
+
+
+def _git_ignored(tree: Path) -> frozenset[str]:
+    """What git ignores in a tree, as the tools that read .gitignore themselves see it.
+
+    :param tree: the tree.
+    :return: paths relative to the tree, directories with a trailing "/"; empty without git,
+        outside a work tree, and in a tree that git ignores as a whole.
     """
     if shutil.which("git") is None:
         return frozenset()
 
     result = subprocess.run(
         ["git", "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"],
-        cwd=root,
+        cwd=tree,
         capture_output=True,
         text=True,
         check=False,
@@ -311,12 +554,15 @@ def _git_ignored(root: Path) -> frozenset[str]:
     return frozenset(path for path in result.stdout.split("\0") if path)
 
 
-def _shebang_kind(path: Path) -> str | None:
-    """The kind of a file without a suffix, from its shebang.
+def _kind(path: Path) -> str | None:
+    """The kind of a file, from its suffix or, without one, its shebang.
 
     :param path: the file.
-    :return: "python", "shell", or None for anything else.
+    :return: one of the kinds in SUFFIXES and SHEBANGS, or None.
     """
+    if path.suffix:
+        return SUFFIXES.get(path.suffix)
+
     try:
         with path.open("rb") as fin:
             first_line = fin.readline(200)
@@ -326,42 +572,110 @@ def _shebang_kind(path: Path) -> str | None:
     return next((kind for pattern, kind in SHEBANGS if pattern.match(first_line)), None)
 
 
-def _run(
-    checker: Checker, root: Path, files: dict[str, list[str]], *, fix: bool, verbose: bool
-) -> str:
+def _relative(path: Path, root: Path) -> str:
+    """A path as the tools are given it.
+
+    :param path: the path, absolute, below root.
+    :param root: the directory the tools run in.
+    :return: the path relative to root; with "./" in front where it would read as an option.
+    """
+    relative = path.relative_to(root).as_posix()
+    return f"./{relative}" if relative.startswith("-") else relative
+
+
+def _run(checker: Checker, selection: Selection, *, fix: bool, verbose: bool) -> tuple[str, str]:
     """Run one checker, after its fix when asked to, with its output going straight through.
 
     :param checker: the checker.
-    :param root: the tree; the commands run in it.
-    :param files: the tree's files, from `_find_files`.
+    :param selection: the files; the commands run in their project's directory.
     :param fix: run the checker's fix first.
     :param verbose: pass the checker its flag for more output, and print each command.
-    :return: its line in the summary: "ok", "FAILED", "unavailable" or "skipped (why)".
+    :return: its line in the summary: "ok", "FAILED", "unavailable" or "skipped", and why.
     """
-    kind_files = files.get(checker.kind, [])
-    if not kind_files:
-        return f"skipped (no {checker.kind} files)"
+    root = selection.root
+    files = sorted(path for kind in checker.kinds for path in selection.files.get(kind, ()))
+    if checker.suffixes is not None:
+        files = [path for path in files if PurePosixPath(path).suffix in checker.suffixes]
+    if checker.own_excludes is not None and files:
+        patterns = checker.own_excludes(_config_file(checker.config, root))
+        files = [path for path in files if not _walk_excluded(path, root, patterns)]
+    if not files:
+        return "skipped", f"no {'/'.join(checker.kinds)} files"
 
     if shutil.which(checker.check[0]) is None:
         print(f"\n== {checker.name}: {checker.check[0]} not found", file=sys.stderr)
-        return "unavailable"
+        return "unavailable", f"{checker.check[0]} not found"
 
     stand_ins = {
-        FILES: kind_files,
-        SCRIPTS: [path for path in kind_files if not Path(path).suffix],
         CONFIG: _config_args(checker.config, root),
         VERBOSE: [checker.verbose] if verbose else [],
     }
     env = _config_env(checker.config, root)
     if fix and checker.fix is not None:
-        command = _expand(checker.fix, stand_ins)
-        _announce(f"{checker.name} (fix)", command, verbose=verbose)
-        subprocess.run(command, cwd=root, env=env, check=False)
+        for command in _commands(checker.fix, stand_ins, files):
+            _announce(f"{checker.name} (fix)", command, verbose=verbose)
+            subprocess.run(command, cwd=root, env=env, check=False)
 
-    command = _expand(checker.check, stand_ins)
-    _announce(checker.name, command, verbose=verbose)
-    result = subprocess.run(command, cwd=root, env=env, check=False)
-    return "ok" if result.returncode == 0 else "FAILED"
+    failed = False
+    for command in _commands(checker.check, stand_ins, files):
+        _announce(checker.name, command, verbose=verbose)
+        failed |= subprocess.run(command, cwd=root, env=env, check=False).returncode != 0
+    count = f"{len(files)} file{'' if len(files) == 1 else 's'}"
+    return ("FAILED" if failed else "ok"), count
+
+
+def _walk_excluded(path: str, root: Path, patterns: list[str]) -> bool:
+    """Whether a tool that walks the project leaves a file out, by fnmatch patterns of its own.
+
+    :param path: the file, relative to root.
+    :param root: the project's directory, which the tool would walk.
+    :param patterns: patterns for a name, or for an absolute path.
+    :return: True when the file, or a directory above it below root, matches.
+    """
+    parts = PurePosixPath(path).parts
+    return any(
+        fnmatch.fnmatch(parts[depth], pattern)
+        or fnmatch.fnmatch(str(root.joinpath(*parts[: depth + 1])), pattern)
+        for depth in range(len(parts))
+        for pattern in patterns
+    )
+
+
+def _commands(
+    command: tuple[str, ...], stand_ins: dict[str, list[str]], files: list[str]
+) -> Iterator[list[str]]:
+    """A command with its stand-ins replaced, as many times as its files need.
+
+    :param command: the command.
+    :param stand_ins: what each stand-in but FILES becomes.
+    :param files: the files, which FILES becomes, as many as a command line holds at a time.
+    :return: the command lines.
+    """
+    fixed = [arg for arg in command if arg != FILES]
+    room = _arg_room() - sum(len(os.fsencode(arg)) + ARG_COST for arg in fixed)
+    batch: list[str] = []
+    size = 0
+    for path in files:
+        cost = len(os.fsencode(path)) + ARG_COST
+        if batch and size + cost > room:
+            yield _expand(command, {**stand_ins, FILES: batch})
+            batch, size = [], 0
+        batch.append(path)
+        size += cost
+    yield _expand(command, {**stand_ins, FILES: batch})
+
+
+def _arg_room() -> int:
+    """How much a command line may hold.
+
+    :return: bytes, as ARG_COST counts them.
+    """
+    try:
+        arg_max = os.sysconf("SC_ARG_MAX")
+    except (ValueError, OSError):
+        arg_max = 2**17
+    environment = sum(len(key) + len(value) + ARG_COST for key, value in os.environ.items())
+    return max(arg_max // 2 - environment, 2**12)
 
 
 def _announce(title: str, command: list[str], *, verbose: bool) -> None:
@@ -389,15 +703,24 @@ def _expand(command: tuple[str, ...], stand_ins: dict[str, list[str]]) -> list[s
     return expanded
 
 
+def _split_list(value: str) -> list[str]:
+    """A list option of an INI configuration.
+
+    :param value: the option's value: items separated by commas or whitespace.
+    :return: the items.
+    """
+    return [item for item in re.split(r"[,\s]+", value) if item]
+
+
 def _config_args(config: DefaultConfig | None, root: Path) -> list[str]:
     """The arguments that point a tool at bash-camp's default configuration.
 
     :param config: the default, or None for a tool without one.
-    :param root: the tree.
+    :param root: the project's directory.
     :return: the option and the file; nothing where the project configures the tool itself, or
         the tool has no such option.
     """
-    if config is None or config.option is None or _configured(config, root):
+    if config is None or config.option is None or _project_config(config, root) is not None:
         return []
     return [config.option, str(CONFIG_DIR / config.path)]
 
@@ -406,29 +729,44 @@ def _config_env(config: DefaultConfig | None, root: Path) -> dict[str, str] | No
     """The environment that points a tool without a config option at bash-camp's default.
 
     :param config: the default, or None for a tool without one.
-    :param root: the tree.
+    :param root: the project's directory.
     :return: the environment with $XDG_CONFIG_HOME at CONFIG_DIR; None, to inherit it, for a tool
         with a config option or where the project configures the tool itself.
     """
-    if config is None or config.option is not None or _configured(config, root):
+    if config is None or config.option is not None or _project_config(config, root) is not None:
         return None
     return {**os.environ, "XDG_CONFIG_HOME": str(CONFIG_DIR)}
 
 
-def _configured(config: DefaultConfig, root: Path) -> bool:
-    """Whether the tree configures a tool itself.
+def _config_file(config: DefaultConfig | None, root: Path) -> Path:
+    """The configuration file a tool reads.
+
+    :param config: the tool's default.
+    :param root: the project's directory.
+    :return: the project's, or bash-camp's default.
+    """
+    if config is None:
+        raise ValueError("a checker that reads its configuration needs a DefaultConfig")
+    return _project_config(config, root) or CONFIG_DIR / config.path
+
+
+def _project_config(config: DefaultConfig, root: Path) -> Path | None:
+    """Where the project configures a tool itself.
 
     :param config: the tool's default, which lists where a project would configure it.
-    :param root: the tree.
-    :return: True when any of those places has a configuration.
+    :param root: the project's directory.
+    :return: the first of those places with a configuration, or None.
     """
-    return any(_configures(root, place) for place in config.project)
+    return next(
+        (root / place.partition(":")[0] for place in config.project if _configures(root, place)),
+        None,
+    )
 
 
 def _configures(root: Path, place: str) -> bool:
-    """Whether the tree has a configuration in one place.
+    """Whether the project has a configuration in one place.
 
-    :param root: the tree.
+    :param root: the project's directory.
     :param place: a file name, or "file:[section]" for a section of a shared file.
     :return: True when the file exists, and has the section if one is named.
     """

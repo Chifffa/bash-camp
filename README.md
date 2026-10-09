@@ -59,7 +59,8 @@ camp strike                                                    # gone again, the
 - 🤫 **Quiet**: no locale warnings on servers missing your locale, no ble.sh chatter.
 - ⛺ **`tent`**: the tmux session to work in, with htop, `watch nvidia-smi` on a GPU host, and a
   shell.
-- 🔍 **`check`**: every linter on any source tree, with or without git.
+- 🔍 **`check`**: every linter on any files and source trees, with or without git, and one
+  `--exclude` for all of them.
 
 ## Requirements
 
@@ -88,7 +89,7 @@ compiler, where there is one, builds its treesitter parsers and Telescope's fast
 | `camp resupply` | Update only the secrets of the installation here, from `secrets/` |
 | `camp resupply HOST...` | Ship only `secrets/` to installed remote hosts and update theirs |
 | `tent` | Attach to the `tent` tmux session, creating it first; `tent strike` kills it |
-| `check [DIR]` | Run every linter on a tree; `--fix` formats and autofixes first, `--skip NAME`, `-v` for more output |
+| `check [PATH...]` | Run every linter on files and trees; `--exclude PATTERN` leaves files out of all of them, `--fix` formats and autofixes first, `--skip NAME`, `-v` for more output |
 | `docker-gpu-stat` | GPU usage per running Docker container |
 | `git-rsafe-add DIR` | Mark every git repository under `DIR` as a `safe.directory` |
 
