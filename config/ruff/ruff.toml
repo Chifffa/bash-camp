@@ -20,6 +20,7 @@ external = [
   "WPS409",
   "WPS418",
   "WPS422",
+  "WPS427",
   "WPS438",
   "WPS439",
   "WPS443",
@@ -53,6 +54,7 @@ external = [
   "WPS608",
   "WPS610",
   "WPS611",
+  "WPS612",
   "WPS613",
   "WPS616",
   "WPS617",
@@ -84,6 +86,7 @@ select = [
   "A",  # flake8-builtins: no shadowing of Python builtins
   "ASYNC",  # flake8-async: blocking calls and other pitfalls inside async functions
   "DTZ",  # flake8-datetimez: timezone-aware datetimes only
+  "FBT",  # flake8-boolean-trap: no boolean positionals in definitions and calls
   "FLY",  # flynt: static join → f-string
   "ICN",  # flake8-import-conventions: canonical third-party aliases
   "PLW",  # pylint Warning-severity checks (silent-behavior bugs, subprocess check, hashing)

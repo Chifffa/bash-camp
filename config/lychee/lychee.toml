@@ -3,4 +3,4 @@
 no_ignore = false
 hidden = false
 extensions = ["md", "txt", "html", "yml", "yaml"]
-accept = ["200", "429", "403", "202"]
+accept = ["200", "429", "403", "202", "401"]

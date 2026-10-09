@@ -97,7 +97,7 @@ REMOTE_REQUIRED_URLS = (
 SSH_BASE_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=10")
 
 
-def deploy(hosts: list[str], check: bool, ssh_option: list[str]) -> int:
+def deploy(hosts: list[str], *, check: bool, ssh_option: list[str]) -> int:
     """`camp pitch HOST...`: check, sync and install bash-camp on remote hosts over ssh.
 
     :param hosts: the hosts, as ssh understands them.
